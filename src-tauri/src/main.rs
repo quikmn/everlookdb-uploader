@@ -318,7 +318,7 @@ fn message(app: &AppHandle, text: &str, kind: MessageDialogKind) {
     app.dialog().message(text).title("EverlookDB Uploader").kind(kind).show(|_| {});
 }
 
-/// Check for a new version shortly after start and then every 6 hours; install it quietly and restart.
+/// Check for a new version a minute after start and then every hour; install it silently and restart.
 fn spawn_updater(app: AppHandle) {
     if cfg!(debug_assertions) {
         return;
@@ -327,7 +327,7 @@ fn spawn_updater(app: AppHandle) {
         let mut wait = Duration::from_secs(60);
         loop {
             std::thread::sleep(wait);
-            wait = Duration::from_secs(6 * 3600);
+            wait = Duration::from_secs(3600);
             let result = tauri::async_runtime::block_on(async {
                 let Some(update) = app.updater()?.check().await? else { return Ok(false) };
                 config::log(&format!("updating to {}", update.version));
