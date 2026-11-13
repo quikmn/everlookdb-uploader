@@ -83,4 +83,4 @@ variable `MAC_IDENTITY`. Without the Apple ones it builds an ad-hoc signed app t
 
 ## License
 
-MIT. Not affiliated with Blizzard Entertainment.
+GPL-3.0-or-later (see LICENSE). Not affiliated with Blizzard Entertainment.
