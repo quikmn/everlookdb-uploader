@@ -1,0 +1,7 @@
+/src-tauri/target/
+/src-tauri/gen/
+/dist/
+*.key
+*.key.pub
+*.password
+.DS_Store

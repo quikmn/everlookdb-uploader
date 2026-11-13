@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- EverlookDB Uploader icon source. Regenerate the icon set with: cargo tauri icon assets/app-icon.svg -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2117"/>
+      <stop offset="1" stop-color="#110d09"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6d585"/>
+      <stop offset="1" stop-color="#c2872a"/>
+    </linearGradient>
+  </defs>
+  <rect x="72" y="72" width="880" height="880" rx="196" fill="url(#tile)"/>
+  <rect x="96" y="96" width="832" height="832" rx="174" fill="none" stroke="#c99a3e" stroke-opacity="0.55" stroke-width="12"/>
+  <g fill="url(#gold)">
+    <rect x="318" y="268" width="112" height="488" rx="18"/>
+    <rect x="318" y="268" width="398" height="104" rx="18"/>
+    <rect x="318" y="460" width="330" height="104" rx="18"/>
+    <rect x="318" y="652" width="398" height="104" rx="18"/>
+  </g>
+</svg>
