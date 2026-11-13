@@ -45,10 +45,23 @@ if (-not $LatestOnly) {
   }
   $setup = Get-ChildItem src-tauri\target\release\bundle\nsis\*_x64-setup.exe | Where-Object Name -like "*_${Version}_*" | Select-Object -First 1
   if (-not $setup) { throw 'No installer was built.' }
-  foreach ($f in @($setup.FullName, 'src-tauri\target\release\everlookdb-uploader.exe')) {
+  # Check the installer and the app inside it. Not target\release\everlookdb-uploader.exe: tauri signs that file before
+  # packaging it, then rewrites it (removes its bundle-type patch), which drops the signature from that copy only.
+  $check = @($setup.FullName)
+  $sevenZip = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  $unpacked = Join-Path $env:TEMP 'everlookdb-setup-check'
+  if ($sevenZip) {
+    Remove-Item $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+    & $sevenZip x -y "-o$unpacked" $setup.FullName | Out-Null
+    $inner = Get-ChildItem $unpacked -Recurse -Filter everlookdb-uploader.exe | Select-Object -First 1
+    if (-not $inner) { throw 'everlookdb-uploader.exe not found inside the installer.' }
+    $check += $inner.FullName
+  } else { Write-Host '7-Zip not found: checking only the installer signature.' -ForegroundColor Yellow }
+  foreach ($f in $check) {
     $sig = Get-AuthenticodeSignature $f
     if ($sig.Status -ne 'Valid') { throw "$f isn't signed: $($sig.StatusMessage)" }
   }
+  Remove-Item $unpacked -Recurse -Force -ErrorAction SilentlyContinue
   Copy-Item $setup.FullName (Join-Path $Dist $WinAsset) -Force
   Copy-Item "$($setup.FullName).sig" (Join-Path $Dist "$WinAsset.sig") -Force
   Write-Host "Built and signed $WinAsset" -ForegroundColor Green
