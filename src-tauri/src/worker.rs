@@ -1,4 +1,4 @@
-// Watches every WTF/Account/*/SavedVariables/EverlookDB.lua and uploads it once the game has finished
+// Watches every WTF/Account/*/SavedVariables/EverlookDB.lua and EverlookDBAuctions.lua and uploads each once the game has finished
 // writing it. A cheap poll (every few seconds, file size and time only) instead of a file watcher: the
 // game rewrites the file whole on logout or /reload, so this catches every save with no extra crates.
 //
@@ -14,7 +14,17 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+/// EverlookDB.lua is capped at 5 MB by the server; auction scans can be bigger.
 pub const MAX_UPLOAD: u64 = 5 * 1024 * 1024;
+pub const MAX_AUCTIONS_UPLOAD: u64 = 12 * 1024 * 1024;
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+fn max_for(path: &Path) -> u64 {
+    if file_name(path) == "EverlookDBAuctions.lua" { MAX_AUCTIONS_UPLOAD } else { MAX_UPLOAD }
+}
 const POLL: Duration = Duration::from_secs(4);
 /// the file must be this old and unchanged since the last poll before it is read
 const SETTLE: Duration = Duration::from_secs(3);
@@ -84,14 +94,29 @@ pub fn upload(http: &reqwest::blocking::Client, server: &str, body: Vec<u8>) -> 
     match code {
         200 => Outcome::Sent(summary(&json)),
         429 => Outcome::Busy(Duration::from_secs(retry.unwrap_or(30).clamp(5, 3600))),
-        413 => Outcome::Refused("the file is larger than 5 MB".into()),
+        413 => Outcome::Refused("the file is too large".into()),
         400 | 422 => Outcome::Refused(message.unwrap_or_else(|| "the server could not read the file".into())),
         _ => Outcome::Failed(format!("server error {code}")),
     }
 }
 
-/// "Uploaded: 9 NPCs, 22 loot sources" from the server's answer.
+/// "Uploaded: 9 NPCs, 22 loot sources" (or "Auctions: Realm Alliance, 222,636 auctions") from the server's answer.
 fn summary(v: &serde_json::Value) -> String {
+    if v["kind"] == "auctions" {
+        if v["accepted"].as_u64().unwrap_or(0) == 0 {
+            return "Auctions up to date (no new scan)".into();
+        }
+        let houses: Vec<String> = v["houses"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .take(2)
+                    .map(|h| format!("{} {}, {} auctions", h["realm"].as_str().unwrap_or("?"), h["side"].as_str().unwrap_or("?"), h["auctions"].as_u64().unwrap_or(0)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return format!("Auctions: {}", houses.join("; "));
+    }
     const PARTS: &[(&str, &str)] =
         &[("npcs", "NPCs"), ("loot_sources", "loot sources"), ("objects", "objects"), ("vendors", "vendors"), ("quests", "quests")];
     let a = &v["accepted"];
@@ -190,11 +215,11 @@ impl Watcher {
                 continue;
             }
             let k = key(&self.shared.server, f);
-            if meta.len() > MAX_UPLOAD {
+            if meta.len() > max_for(f) {
                 let done = self.shared.cfg.lock().unwrap().done.get(&k).is_some_and(|d| !d.ok && d.hash == "too-big");
                 if !done || force {
                     remember(&self.shared, &k, "too-big".into(), false, None);
-                    set(Kind::Error, "Not sent: EverlookDB.lua is larger than 5 MB".into());
+                    set(Kind::Error, format!("Not sent: {} is larger than {} MB", file_name(f), max_for(f) / 1024 / 1024));
                 }
                 continue;
             }
@@ -217,7 +242,7 @@ impl Watcher {
                 }
                 Outcome::Refused(why) => {
                     remember(&self.shared, &k, hash, false, None);
-                    set(Kind::Error, format!("Not accepted: {why}"));
+                    set(Kind::Error, format!("{} not accepted: {why}", file_name(f)));
                 }
                 Outcome::Busy(wait) => {
                     self.blocked_until = Some(Instant::now() + wait);
@@ -233,7 +258,7 @@ impl Watcher {
         result.unwrap_or_else(|| {
             let last = self.shared.cfg.lock().unwrap().last_status.clone();
             match (files.is_empty(), last) {
-                (true, _) => Status { kind: Kind::Idle, line: "Waiting for EverlookDB.lua (log out or /reload in game)".into(), files: 0 },
+                (true, _) => Status { kind: Kind::Idle, line: "Waiting for the addons' files (log out or /reload in game)".into(), files: 0 },
                 (false, Some(l)) => Status { kind: Kind::Ok, line: l, files: files.len() },
                 (false, None) => Status { kind: Kind::Idle, line: "Watching for changes".into(), files: files.len() },
             }

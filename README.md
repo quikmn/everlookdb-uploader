@@ -4,7 +4,7 @@ A small tray app for Windows and macOS that uploads the [EverlookDB addon](https
 data to [everlookdb.com](https://everlookdb.com/contribute.html) by itself, so you never have to upload the file by hand.
 
 WoW addons can't use the network. The EverlookDB addon writes what it recorded to
-`World of Warcraft/_forever_/WTF/Account/<account>/SavedVariables/EverlookDB.lua` when you log out or `/reload`.
+`World of Warcraft/_forever_/WTF/Account/<account>/SavedVariables/EverlookDB.lua` (and `EverlookDBAuctions.lua`, the EverlookDB Auctions addon's auction scans) when you log out or `/reload`.
 The uploader notices that, waits until the game has finished writing, and sends the file to
 `https://everlookdb.com/api/v1/upload`, the same as the upload box on the site.
 
@@ -24,13 +24,13 @@ The menu shows the last upload ("Uploaded: 9 NPCs, 22 loot sources") and has **U
 
 ## Privacy
 
-**It sends only EverlookDB.lua game facts.** The request body is that one file, as it is on disk, and nothing else:
+**It sends only the game facts in EverlookDB.lua and EverlookDBAuctions.lua.** Each request body is one of those files, as it is on disk, and nothing else:
 no account or character names, no file paths (the path holds your account folder name, so it is never sent), no
 other files, no machine information. The server keeps only the checked game facts, not the file or your IP address;
 see [everlookdb.com/privacy.html](https://everlookdb.com/privacy.html).
 
 It sends a file only when its content changed since the last upload. Several accounts are fine: every
-`WTF/Account/*/SavedVariables/EverlookDB.lua` is watched.
+`WTF/Account/*/SavedVariables/EverlookDB.lua` and `EverlookDBAuctions.lua` is watched.
 
 Its settings and a small log stay on your computer, in `%APPDATA%\com.everlookdb.uploader` (Windows) or
 `~/Library/Application Support/com.everlookdb.uploader` (macOS). Updates are checked at

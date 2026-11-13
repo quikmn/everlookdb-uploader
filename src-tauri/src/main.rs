@@ -21,7 +21,7 @@ use tauri_plugin_updater::UpdaterExt;
 use worker::{Cmd, Shared, Status, Watcher};
 
 const DEFAULT_SERVER: &str = "https://everlookdb.com";
-const PRIVACY: &str = "Sends only EverlookDB.lua game facts";
+const PRIVACY: &str = "Sends only the game facts in EverlookDB.lua and EverlookDBAuctions.lua";
 const AUTOSTART: &str = if cfg!(target_os = "macos") { "Open at login" } else { "Start with Windows" };
 const HELP: &str = "EverlookDB Uploader: uploads the EverlookDB addon's data file to everlookdb.com whenever the game saves it.
 
@@ -119,7 +119,7 @@ fn command_line(args: &Args) -> i32 {
         println!("Data file:   {} ({} bytes)", f.display(), std::fs::metadata(f).map(|m| m.len()).unwrap_or(0));
     }
     if files.is_empty() {
-        println!("No WTF/Account/*/SavedVariables/EverlookDB.lua yet.");
+        println!("No WTF/Account/*/SavedVariables/EverlookDB.lua or EverlookDBAuctions.lua yet.");
     }
     if !args.once {
         return 0;
@@ -243,7 +243,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, welcome: bool) -> tauri::Result<(
         message(
             app,
             &format!(
-                "EverlookDB Uploader is running in the tray.\n\nIt uploads EverlookDB.lua from\n{}\nwhenever the game saves it (log out or /reload).\n\n{PRIVACY}: no account or character names, no file paths.",
+                "EverlookDB Uploader is running in the tray.\n\nIt uploads EverlookDB.lua and EverlookDBAuctions.lua from\n{}\nwhenever the game saves it (log out or /reload).\n\n{PRIVACY}: no account or character names, no file paths.",
                 shared_dir(app).unwrap().display()
             ),
             MessageDialogKind::Info,

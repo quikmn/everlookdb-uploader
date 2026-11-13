@@ -87,12 +87,16 @@ pub fn find_install() -> Option<PathBuf> {
     candidates().iter().find_map(|p| resolve(p))
 }
 
-/// Every `WTF/Account/*/SavedVariables/EverlookDB.lua` under the `_forever_` folder.
+/// The SavedVariables files of our addons: EverlookDB (loot, NPCs, vendors, quests) and EverlookDB Auctions
+/// (auction house scans). Nothing else is ever read or sent.
+pub const DATA_FILES: [&str; 2] = ["EverlookDB.lua", "EverlookDBAuctions.lua"];
+
+/// Every `WTF/Account/*/SavedVariables/<one of DATA_FILES>` under the `_forever_` folder.
 pub fn data_files(forever: &Path) -> Vec<PathBuf> {
     let Ok(accounts) = std::fs::read_dir(forever.join("WTF").join("Account")) else { return Vec::new() };
     let mut out: Vec<PathBuf> = accounts
         .flatten()
-        .map(|a| a.path().join("SavedVariables").join("EverlookDB.lua"))
+        .flat_map(|a| DATA_FILES.map(|name| a.path().join("SavedVariables").join(name)))
         .filter(|f| f.is_file())
         .collect();
     out.sort();
