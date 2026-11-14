@@ -100,6 +100,8 @@ jobs:
           b="src-tauri/target/universal-apple-darwin/release/bundle"
           mkdir -p dist
           cp "$b/dmg/"*.dmg "dist/EverlookDB-Uploader_${v}_universal.dmg"
+          # fixed name too: everlookdb.com links to releases/latest/download/EverlookDB-Uploader-mac.dmg
+          cp "$b/dmg/"*.dmg "dist/EverlookDB-Uploader-mac.dmg"
           if [ -f "$b/macos/EverlookDB Uploader.app.tar.gz.sig" ]; then
             cp "$b/macos/EverlookDB Uploader.app.tar.gz" "dist/EverlookDB-Uploader_${v}_universal.app.tar.gz"
             cp "$b/macos/EverlookDB Uploader.app.tar.gz.sig" "dist/EverlookDB-Uploader_${v}_universal.app.tar.gz.sig"

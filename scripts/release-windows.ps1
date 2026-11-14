@@ -1,4 +1,4 @@
-# Windows release, run on the owner's PC (the code-signing certificate is a SimplySign cloud certificate that only
+﻿# Windows release, run on the owner's PC (the code-signing certificate is a SimplySign cloud certificate that only
 # exists while SimplySign Desktop is logged in, so this can't run in CI):
 #   1. bump "version" in src-tauri/tauri.conf.json and src-tauri/Cargo.toml, commit, tag vX.Y.Z, push the tag
 #      (that starts the macOS build in GitHub Actions, which uploads the Mac files to the same release)
@@ -69,7 +69,9 @@ if (-not $LatestOnly) {
   if (-not $NoUpload) {
     gh release view $Tag -R $Repo *> $null
     if ($LASTEXITCODE -ne 0) { gh release create $Tag -R $Repo --draft --title "EverlookDB Uploader $Version" --notes "EverlookDB Uploader $Version" }
-    gh release upload $Tag -R $Repo (Join-Path $Dist $WinAsset) (Join-Path $Dist "$WinAsset.sig") --clobber
+    # fixed name too: everlookdb.com links to releases/latest/download/EverlookDB-Uploader-windows.exe
+    Copy-Item (Join-Path $Dist $WinAsset) (Join-Path $Dist 'EverlookDB-Uploader-windows.exe') -Force
+    gh release upload $Tag -R $Repo (Join-Path $Dist $WinAsset) (Join-Path $Dist "$WinAsset.sig") (Join-Path $Dist 'EverlookDB-Uploader-windows.exe') --clobber
     if ($LASTEXITCODE -ne 0) { throw 'Upload failed.' }
   }
 }
