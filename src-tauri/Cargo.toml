@@ -1,6 +1,6 @@
 [package]
 name = "everlookdb-uploader"
-version = "0.2.0"
+version = "0.2.1"
 description = "Uploads EverlookDB addon data (EverlookDB.lua) to everlookdb.com automatically"
 authors = ["Viktor Lundgren"]
 license = "GPL-3.0-or-later"
