@@ -210,8 +210,12 @@ fn run(args: Args) {
     config::log(&format!("start {} (server {})", env!("CARGO_PKG_VERSION"), args.server));
 
     let mut builder = tauri::Builder::default();
-    // a test instance with its own settings folder may run next to the real one
-    if std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_none_or(|v| v.is_empty()) {
+    // a test instance (its own settings folder) may run next to the real one, and never opens its window by itself
+    let test_instance = std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_some_and(|v| !v.is_empty());
+    // the window opens at start only when the player started the app (not at login, not a development or test run);
+    // after that only when they click the tray icon
+    let show_at_start = !args.background && !test_instance && !cfg!(debug_assertions);
+    if !test_instance {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)));
     }
     let app = builder
@@ -237,7 +241,7 @@ fn run(args: Args) {
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            setup(app.handle(), shared, !args.background)?;
+            setup(app.handle(), shared, show_at_start)?;
             Ok(())
         })
         .build(tauri::generate_context!())
