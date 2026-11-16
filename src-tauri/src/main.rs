@@ -7,6 +7,7 @@ mod addons;
 mod blp;
 mod catalog;
 mod config;
+mod icons;
 mod manager;
 mod worker;
 mod wow;
@@ -14,6 +15,7 @@ mod wow;
 use catalog::{Catalog, Origin};
 use config::Config;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -87,6 +89,16 @@ fn default_config_dir() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("com.everlookdb.uploader")
 }
 
+/// %LOCALAPPDATA%\com.everlookdb.uploader (Windows), ~/Library/Caches/com.everlookdb.uploader (macOS).
+fn default_cache_dir() -> Option<PathBuf> {
+    let base = if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches"))
+    } else {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    };
+    base.map(|b| b.join("com.everlookdb.uploader"))
+}
+
 /// A windowed exe has no console; borrow the one it was started from for the command-line modes.
 fn attach_console() {
     #[cfg(windows)]
@@ -107,6 +119,7 @@ fn main() {
         }
     };
     config::init_dir(default_config_dir());
+    config::init_cache_dir(default_cache_dir());
     if args.check || args.once {
         attach_console();
         std::process::exit(command_line(&args));
@@ -171,6 +184,8 @@ struct Ui {
     shared: Arc<Shared>,
     uploads: Mutex<UploadState>,
     catalog: Mutex<CatalogState>,
+    /// (install id, item key) -> the texture its .toc names as its icon (from the last list of that install)
+    icon_files: Mutex<HashMap<(String, String), PathBuf>>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -238,6 +253,7 @@ fn run(args: Args) {
             upload_now,
             open_url,
             open_addons_folder,
+            addon_icons,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -328,7 +344,9 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
         shared: shared.clone(),
         uploads: Mutex::new(UploadState { line: "Starting…".into(), kind: "idle", paused, ..Default::default() }),
         catalog: Mutex::new(CatalogState::default()),
+        icon_files: Mutex::new(HashMap::new()),
     });
+    std::thread::spawn(icons::prune);
 
     let handle = app.clone();
     let mut last: Option<(String, usize, Option<PathBuf>)> = None;
@@ -515,7 +533,41 @@ fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
 #[tauri::command(async)]
 fn list_installed(ui: State<Ui>, install: String) -> Result<Vec<manager::Item>, String> {
     let i = find_install(&ui, &install)?;
-    Ok(manager::list(&i, ui.catalog().as_deref()))
+    let items = manager::list(&i, ui.catalog().as_deref());
+    let mut files = ui.icon_files.lock().unwrap();
+    files.retain(|(install, _), _| *install != i.id);
+    files.extend(items.iter().filter_map(|it| it.icon_file.clone().map(|f| ((i.id.clone(), it.key.clone()), f))));
+    Ok(items)
+}
+
+/// Icons for the rows the window shows (installed addons and catalog entries, by key), as data: URLs; null for
+/// none (the window draws a letter tile). The addon's own icon first, then the one its source gives.
+#[tauri::command]
+async fn addon_icons(app: AppHandle, install: String, keys: Vec<String>) -> Result<HashMap<String, Option<String>>, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        let cat = ui.catalog();
+        let jobs: Vec<(String, Option<PathBuf>, Option<String>)> = {
+            let files = ui.icon_files.lock().unwrap();
+            keys.into_iter()
+                .take(64)
+                .map(|k| {
+                    let file = files.get(&(install.clone(), k.clone())).cloned();
+                    let url = cat.as_deref().and_then(|c| c.get(&k)).and_then(icons::source_url);
+                    (k, file, url)
+                })
+                .collect()
+        };
+        // downloads wait on the network: one thread each (a batch is a screenful)
+        Ok(std::thread::scope(|s| {
+            let running: Vec<_> = jobs
+                .into_iter()
+                .map(|(k, file, url)| s.spawn(move || (k, file.as_deref().and_then(icons::local).or_else(|| url.as_deref().and_then(icons::remote)))))
+                .collect();
+            running.into_iter().filter_map(|h| h.join().ok()).collect()
+        }))
+    })
+    .await
 }
 
 #[derive(Serialize)]

@@ -18,6 +18,8 @@ pub struct Toc {
     pub wago_id: Option<String>,
     pub wowi_id: Option<String>,
     pub website: Option<String>,
+    /// `## IconTexture:` as written (a path in Interface\AddOns, a game texture, or a file ID)
+    pub icon: Option<String>,
 }
 
 /// Remove WoW's escape codes: colours (|cAARRGGBB ... |r), textures (|T...|t), atlases (|A...|a), line breaks (|n).
@@ -95,6 +97,7 @@ pub fn parse_toc(text: &str) -> Toc {
             "x-wago-id" => t.wago_id = clean(value),
             "x-wowi-id" => t.wowi_id = clean(value),
             "x-website" => t.website = clean(value),
+            "icontexture" => t.icon = Some(value.to_string()).filter(|v| !v.is_empty()),
             k if k == "dependencies" || k == "requireddeps" || (k.starts_with("dep") && !k.contains('-')) => {
                 t.deps.extend(value.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()));
             }
@@ -249,7 +252,7 @@ mod tests {
 
     #[test]
     fn toc_fields() {
-        let t = parse_toc("\u{feff}## Interface: 120105, 50504, 16001\n## Title: Titan Panel [|cffeda55f_Core_|r] |cff00aa009.3.6|r\n## Version: 9.3.6\n## Author: Titan Panel Dev Team\n## Notes: Bars.|n|TInterface/Addons/X/Art/Patreon:12:12|t |cff82c5ffpatreon|r\n## X-Curse-Project-ID: 489\n## X-Wago-ID: abc\n## RequiredDeps: Foo, Bar\n## Dependencies: Baz\n# comment: no\n");
+        let t = parse_toc("\u{feff}## Interface: 120105, 50504, 16001\n## Title: Titan Panel [|cffeda55f_Core_|r] |cff00aa009.3.6|r\n## Version: 9.3.6\n## Author: Titan Panel Dev Team\n## Notes: Bars.|n|TInterface/Addons/X/Art/Patreon:12:12|t |cff82c5ffpatreon|r\n## X-Curse-Project-ID: 489\n## X-Wago-ID: abc\n## IconTexture: Interface\\AddOns\\Titan\\Artwork\\Titan\n## IconAtlas: ignored\n## RequiredDeps: Foo, Bar\n## Dependencies: Baz\n# comment: no\n");
         assert_eq!(t.title.as_deref(), Some("Titan Panel [_Core_] 9.3.6"));
         assert_eq!(t.version.as_deref(), Some("9.3.6"));
         assert_eq!(t.interfaces, vec![120105, 50504, 16001]);
@@ -257,6 +260,9 @@ mod tests {
         assert_eq!(t.curse_id.as_deref(), Some("489"));
         assert_eq!(t.wago_id.as_deref(), Some("abc"));
         assert_eq!(t.deps, vec!["Foo", "Bar", "Baz"]);
+        assert_eq!(t.icon.as_deref(), Some(r"Interface\AddOns\Titan\Artwork\Titan"));
+        assert_eq!(parse_toc("## IconTexture: 134400").icon.as_deref(), Some("134400"));
+        assert_eq!(parse_toc("## IconTexture:").icon, None);
         assert_eq!(parse_toc("## Version: @project-version@").version, None);
         assert_eq!(strip_codes("a || b"), "a | b");
     }

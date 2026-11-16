@@ -38,6 +38,9 @@ pub struct Addon {
     pub folders: Vec<String>,
     #[serde(default)]
     pub ours: bool,
+    /// a square picture the source gives for the addon (https), when the catalog has one
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

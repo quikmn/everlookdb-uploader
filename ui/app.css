@@ -24,6 +24,7 @@
 
   --r-s: 6px;
   --r-m: 10px;
+  --ico: 36px;
 }
 
 * { box-sizing: border-box; }
@@ -423,11 +424,27 @@ button { cursor: pointer; }
 
 .row-main {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 110px 190px;
+  grid-template-columns: var(--ico) minmax(0, 1fr) 110px 190px;
   align-items: center;
   gap: 16px;
   padding: 12px 4px 12px 0;
 }
+/* addon icon: the addon's own picture, or a letter on a colour of its own (opaque, like everything in .list) */
+.ico {
+  width: var(--ico);
+  height: var(--ico);
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  font: 600 16px/1 var(--display);
+  color: hsl(var(--h, 215) 70% 88%);
+  background: linear-gradient(150deg, hsl(var(--h, 215) 34% 31%), hsl(var(--h, 215) 40% 20%));
+  box-shadow: inset 0 0 0 1px hsl(var(--h, 215) 45% 55% / 0.22);
+}
+.ico.img { background: var(--raise-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.ico img { width: 100%; height: 100%; display: block; }
+
 .row-head {
   display: block;
   min-width: 0;
@@ -525,7 +542,7 @@ button { cursor: pointer; }
 }
 
 .row-more {
-  padding: 0 4px 14px 0;
+  padding: 0 4px 14px calc(var(--ico) + 16px);
   display: grid;
   gap: 10px;
   color: var(--ink-2);
@@ -560,7 +577,8 @@ button { cursor: pointer; }
   .app { grid-template-columns: 220px 1fr; }
   .hero, .toolbar, .list, .status { padding-left: 22px; padding-right: 22px; }
   .notice { margin-left: 22px; margin-right: 22px; }
-  .row-main { grid-template-columns: minmax(0, 1fr) 90px 160px; }
+  :root { --ico: 32px; }
+  .row-main { grid-template-columns: var(--ico) minmax(0, 1fr) 90px 160px; gap: 14px; }
   .hero-name, .hero-version .num { font-size: 32px; }
 }
 

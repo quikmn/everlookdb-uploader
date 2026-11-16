@@ -7,6 +7,7 @@
 // never in the game folder.
 
 use crate::addons::{self, Folder};
+use crate::icons;
 use crate::catalog::{Addon, Catalog};
 use crate::config;
 use crate::wow::Install;
@@ -117,6 +118,9 @@ pub struct Item {
     pub update: bool,
     pub previous: Option<String>,
     pub url: Option<String>,
+    /// the texture its .toc names as its icon, when that is a file in AddOns (the window asks for it separately)
+    #[serde(skip)]
+    pub icon_file: Option<PathBuf>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -171,6 +175,12 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
             // only offer what runs here
             let latest = entry.filter(|a| a.file_for(&install.accepts).is_some()).map(|a| a.version.clone());
             let name = record.map(|r| r.name.clone()).or(entry.map(|a| a.name.clone())).or(toc.title.clone()).unwrap_or_else(|| g.main.clone());
+            // the main folder's toc first, then the others'
+            let tocs: Vec<&addons::Toc> = std::iter::once(g.main.as_str())
+                .chain(g.folders.iter().map(String::as_str).filter(|f| *f != g.main))
+                .filter_map(|f| by_name.get(f).map(|x| &x.toc))
+                .collect();
+            let icon_file = tocs.iter().find_map(|t| t.icon.as_deref().and_then(|v| icons::resolve(&install.addons_dir, v)));
             Item {
                 key: g.key.clone().unwrap_or_else(|| format!("folder:{}", g.main)),
                 update: latest.as_deref().is_some_and(|l| differs(version.as_deref(), l)),
@@ -185,6 +195,7 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                 latest,
                 previous: record.and_then(|r| r.previous.as_ref().filter(|p| p.zip.is_file()).map(|p| p.version.clone())),
                 url: entry.map(|a| a.url.clone()).or(toc.website.clone()),
+                icon_file,
             }
         })
         .collect();
@@ -722,6 +733,29 @@ mod tests {
         assert!(!differs(Some("4.18.5"), "4.18.4.1"), "an installed newer version isn't an update");
         assert!(differs(Some("4.18.4"), "4.18.4.1"));
         assert!(differs(Some("v1.0-beta"), "v1.0"));
+    }
+
+    #[test]
+    fn icon_files() {
+        let d = tmp("export");
+        let root = d.join("World of Warcraft");
+        let addons_dir = root.join("_forever_").join("Interface").join("AddOns");
+        let toc = |folder: &str, text: &str| {
+            std::fs::create_dir_all(addons_dir.join(folder)).unwrap();
+            std::fs::write(addons_dir.join(folder).join(format!("{folder}.toc")), text).unwrap();
+        };
+        toc("Titan", "## Title: Titan Panel\n## Version: 9.3.6\n## Author: Titan Dev Team\n## IconTexture: Interface\\AddOns\\Titan\\Artwork\\Titan\n## X-Website: https://titanpanel.example\n");
+        toc("TitanBag", "## Title: Titan Bag\n## Dependencies: Titan\n## X-Curse-Project-ID: 489\n## X-Wago-ID: abc\n");
+        std::fs::create_dir_all(addons_dir.join("Titan").join("Artwork")).unwrap();
+        std::fs::write(addons_dir.join("Titan").join("Artwork").join("Titan.tga"), b"x").unwrap();
+        toc("Plain", "## Title: Plain\n## IconTexture: Interface\\Icons\\INV_Misc_Bag_08\n");
+        let install = crate::wow::installs_in(&root).pop().unwrap();
+        let items = list(&install, None);
+        let titan = items.iter().find(|i| i.name == "Titan Panel").unwrap();
+        assert_eq!(titan.icon_file.as_deref(), Some(addons_dir.join("Titan").join("Artwork").join("Titan.tga").as_path()));
+        let plain = items.iter().find(|i| i.name == "Plain").unwrap();
+        assert_eq!(plain.icon_file, None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The whole flow against real GitHub downloads, into a temp folder: `cargo test -- --ignored`.

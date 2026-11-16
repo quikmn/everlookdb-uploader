@@ -24,6 +24,9 @@ const S = {
   confirm: null,
   showOther: false,
   catIndex: new Map(),
+  // addon icons for the selected install, by row key: a data: URL, or null (no icon: a letter tile)
+  icons: new Map(),
+  iconWait: new Set(),
 };
 
 const install = () => S.app?.installs.find((i) => i.id === S.sel) || null;
@@ -146,6 +149,89 @@ function renderList() {
   }
   list.innerHTML = S.tab === 'mine' ? mineHtml(i) : browseHtml(i);
   paintProgress();
+  watchIcons();
+}
+
+// ------------------------------------------------------------------------------------------------ icons
+
+// a colour of its own for every name, for the letter tile of addons without an icon
+function hue(name) {
+  let h = 7;
+  for (const c of String(name)) h = (h * 31 + c.codePointAt(0)) >>> 0;
+  return h % 360;
+}
+
+// the addon's icon, or its letter tile until the icon is in (or when it has none); fixed size, so nothing moves
+function iconHtml(key, name) {
+  const url = S.icons.get(key);
+  if (url) return `<span class="ico img" aria-hidden="true"><img src="${url}" alt=""></span>`;
+  const letter = (String(name).match(/[\p{L}\p{N}]/u)?.[0] || '?').toUpperCase();
+  const want = S.icons.has(key) ? '' : ` data-icon="${esc(key)}"`;
+  return `<span class="ico" aria-hidden="true"${want} style="--h:${hue(name)}">${esc(letter)}</span>`;
+}
+
+// icons load as their rows come near the screen, a few at a time
+const iconSeen = new IntersectionObserver(
+  (entries) => {
+    const keys = [];
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      iconSeen.unobserve(e.target);
+      const k = e.target.dataset.icon;
+      if (k && !S.icons.has(k) && !S.iconWait.has(k)) {
+        S.iconWait.add(k);
+        keys.push(k);
+      }
+    }
+    for (let n = 0; n < keys.length; n += 8) loadIcons(keys.slice(n, n + 8));
+  },
+  { root: $('list'), rootMargin: '400px 0px' }
+);
+
+function watchIcons() {
+  iconSeen.disconnect();
+  for (const el of $('list').querySelectorAll('.ico[data-icon]')) iconSeen.observe(el);
+}
+
+async function loadIcons(keys) {
+  const sel = S.sel;
+  let got = {};
+  try {
+    got = await invoke('addon_icons', { install: sel, keys });
+  } catch {
+    // no icons this time: the letter tiles stay
+  }
+  if (sel !== S.sel) return;
+  for (const k of keys) {
+    S.iconWait.delete(k);
+    S.icons.set(k, got[k] || null);
+    paintIcon(k);
+  }
+}
+
+// swap the tile for the icon in place, once the picture is decoded (no flash, no layout change)
+function paintIcon(key) {
+  const url = S.icons.get(key);
+  for (const el of $('list').querySelectorAll(`.ico[data-icon="${CSS.escape(key)}"]`)) {
+    el.removeAttribute('data-icon');
+    if (!url) continue;
+    const img = new Image();
+    img.alt = '';
+    img.src = url;
+    img.decode().then(
+      () => {
+        el.classList.add('img');
+        el.replaceChildren(img);
+      },
+      () => {}
+    );
+  }
+}
+
+// after an install, update or rollback the addon's icon may be new
+function forgetIcons(key) {
+  if (key === '*') S.icons.clear();
+  else S.icons.delete(key);
 }
 
 function mineHtml(i) {
@@ -253,6 +339,7 @@ function mineRow(it, i) {
   const meta = [it.author ? `<span class="author">${esc(it.author)}</span>` : '', it.notes ? esc(it.notes) : ''].filter(Boolean).join('&ensp;');
   return `<li class="row">
     <div class="row-main">
+      ${iconHtml(key, it.name)}
       <button class="row-head" type="button" data-act="toggle" data-key="${esc(key)}" aria-expanded="${open}">
         <span class="row-name"><span class="t">${esc(it.name)}</span>${oursMark(it.ours)}</span>
         <span class="row-meta">${meta || '&nbsp;'}</span>
@@ -346,6 +433,7 @@ function browseRow(a, i, it, runs) {
   const where = page ? 'everlookdb.com' : a.source === 'tukui' ? 'Tukui' : a.source === 'github' ? 'GitHub' : a.source;
   return `<li class="row${runs ? '' : ' dim'}">
     <div class="row-main">
+      ${iconHtml(a.id, a.name)}
       <button class="row-head" type="button" data-act="url" data-url="${esc(page || a.url)}" title="Open ${esc(a.name)} on ${esc(where)}">
         <span class="row-name"><span class="t">${esc(a.name)}</span>${oursMark(a.ours)}</span>
         <span class="row-meta"><span class="author">${esc(a.author)}</span>&ensp;${esc(a.summary)}</span>
@@ -410,6 +498,7 @@ async function run(key, label, fn) {
   } finally {
     S.busy.delete(key);
     S.progress.delete(key);
+    forgetIcons(key);
     if (key === '*') S.progress.clear();
     await loadItems();
   }
@@ -514,6 +603,8 @@ async function selectInstall(id) {
   if (id === S.sel) return;
   S.sel = id;
   S.open.clear();
+  S.icons.clear();
+  S.iconWait.clear();
   S.confirm = null;
   renderRail();
   renderHero();

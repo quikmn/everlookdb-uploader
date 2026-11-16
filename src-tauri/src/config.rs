@@ -19,6 +19,22 @@ pub fn dir() -> PathBuf {
     DIR.get().cloned().unwrap_or_else(std::env::temp_dir)
 }
 
+static CACHE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where things that can be made again are kept (addon icons): this machine's own folder, not the roaming one.
+/// EVERLOOKDB_UPLOADER_DIR keeps them with the settings.
+pub fn init_cache_dir(default: Option<PathBuf>) {
+    let custom = std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_some_and(|s| !s.is_empty());
+    if let Some(d) = default.filter(|_| !custom) {
+        let _ = CACHE.set(d);
+    }
+}
+
+/// The cache folder (the settings folder unless init_cache_dir chose another).
+pub fn cache_dir() -> PathBuf {
+    CACHE.get().cloned().unwrap_or_else(dir)
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Done {
     /// SHA-256 of the file content that was sent
