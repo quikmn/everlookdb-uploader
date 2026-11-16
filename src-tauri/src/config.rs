@@ -59,9 +59,12 @@ pub struct Config {
     /// `World of Warcraft` folders the player added by hand
     #[serde(default)]
     pub extra_roots: Vec<PathBuf>,
-    /// update the addons we installed about once an hour
+    /// update the addons we installed by themselves (every `update_hours`)
     #[serde(default = "yes")]
     pub auto_update: bool,
+    /// how often the addon list is checked (and, with auto_update, addons updated); see `hours()`
+    #[serde(default = "one")]
+    pub update_hours: u32,
     /// the install the window shows (its flavor folder)
     #[serde(default)]
     pub selected: Option<String>,
@@ -71,15 +74,45 @@ fn yes() -> bool {
     true
 }
 
+fn one() -> u32 {
+    1
+}
+
+/// The update interval's range, in hours: never more often than hourly (the server's catalog changes about that
+/// often), at least once a week.
+pub const MIN_HOURS: u32 = 1;
+pub const MAX_HOURS: u32 = 168;
+
+pub fn clamp_hours(h: f64) -> u32 {
+    if h.is_nan() {
+        return MIN_HOURS;
+    }
+    h.round().clamp(MIN_HOURS as f64, MAX_HOURS as f64) as u32
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, extra_roots: Vec::new(), auto_update: true, selected: None }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None }
     }
 }
 
 impl Config {
     fn path() -> PathBuf {
         dir().join("config.json")
+    }
+
+    /// The update interval, kept in range whatever the file says.
+    pub fn hours(&self) -> u32 {
+        clamp_hours(self.update_hours as f64)
+    }
+
+    /// The interval from the window: a number, or the text typed (clamped; text that isn't a number keeps the
+    /// current one). Returns the interval now.
+    pub fn set_hours(&mut self, v: &serde_json::Value) -> u32 {
+        if let Some(h) = v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())) {
+            self.update_hours = clamp_hours(h);
+        }
+        self.hours()
     }
 
     pub fn load() -> Config {
@@ -107,5 +140,47 @@ pub fn log(msg: &str) {
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{} {msg}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_hours_are_clamped() {
+        assert_eq!(clamp_hours(0.0), 1);
+        assert_eq!(clamp_hours(-5.0), 1);
+        assert_eq!(clamp_hours(1.0), 1);
+        assert_eq!(clamp_hours(2.4), 2);
+        assert_eq!(clamp_hours(2.6), 3);
+        assert_eq!(clamp_hours(168.0), 168);
+        assert_eq!(clamp_hours(1000.0), 168);
+        assert_eq!(clamp_hours(f64::NAN), 1);
+        assert_eq!(clamp_hours(f64::INFINITY), 168);
+    }
+
+    #[test]
+    fn update_hours_persist() {
+        // an old config.json without the field: hourly
+        let old: Config = serde_json::from_str(r#"{"auto_update": false}"#).unwrap();
+        assert_eq!((old.update_hours, old.hours(), old.auto_update), (1, 1, false));
+        // a hand-edited file out of range: kept in range
+        let wild: Config = serde_json::from_str(r#"{"update_hours": 9999}"#).unwrap();
+        assert_eq!(wild.hours(), 168);
+        let zero: Config = serde_json::from_str(r#"{"update_hours": 0}"#).unwrap();
+        assert_eq!(zero.hours(), 1);
+        // what save() writes, load() reads back
+        let c = Config { update_hours: 6, ..Default::default() };
+        let back: Config = serde_json::from_slice(&serde_json::to_vec_pretty(&c).unwrap()).unwrap();
+        assert_eq!(back.hours(), 6);
+        // from the window
+        let mut c = Config::default();
+        assert_eq!(c.set_hours(&serde_json::json!(12)), 12);
+        assert_eq!(c.set_hours(&serde_json::json!(" 3 ")), 3);
+        assert_eq!(c.set_hours(&serde_json::json!("lots")), 3);
+        assert_eq!(c.set_hours(&serde_json::json!(500)), 168);
+        assert_eq!(c.set_hours(&serde_json::json!(0)), 1);
+        assert_eq!(c.update_hours, 1);
     }
 }

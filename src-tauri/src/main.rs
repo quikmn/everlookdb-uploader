@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, Wry};
@@ -34,7 +34,7 @@ use worker::{Cmd, Kind, Shared, Status, Watcher};
 const DEFAULT_SERVER: &str = "https://everlookdb.com";
 const PRIVACY: &str = "Sends only the game facts in EverlookDB.lua and EverlookDBAuctions.lua";
 const AUTOSTART: &str = if cfg!(target_os = "macos") { "Open at login" } else { "Start with Windows" };
-/// how often the catalog is refreshed and (when on) addons are updated
+/// how often the app checks for a new version of itself (the addon list follows the player's update_hours)
 const HOURLY: Duration = Duration::from_secs(3600);
 const HELP: &str = "EverlookDB: addon manager for World of Warcraft, and uploader of the EverlookDB addons' data to everlookdb.com.
 
@@ -494,6 +494,9 @@ struct AppState {
     installs: Vec<wow::Install>,
     selected: Option<String>,
     auto_update: bool,
+    update_hours: u32,
+    min_hours: u32,
+    max_hours: u32,
     autostart: bool,
     autostart_label: &'static str,
     uploads: UploadState,
@@ -514,6 +517,7 @@ fn find_install(ui: &Ui, id: &str) -> Result<wow::Install, String> {
 fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
     let list = installs(&ui);
     let cfg = ui.shared.cfg.lock().unwrap().clone();
+    let hours = cfg.hours();
     let selected = cfg.selected.filter(|s| list.iter().any(|i| &i.id == s)).or_else(|| {
         // WoW Forever first: it is what EverlookDB is for
         list.iter().find(|i| i.flavor == "forever").or(list.first()).map(|i| i.id.clone())
@@ -524,6 +528,9 @@ fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
         installs: list,
         selected,
         auto_update: cfg.auto_update,
+        update_hours: hours,
+        min_hours: config::MIN_HOURS,
+        max_hours: config::MAX_HOURS,
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         autostart_label: AUTOSTART,
         uploads: ui.uploads.lock().unwrap().clone(),
@@ -813,6 +820,13 @@ fn forget_folder(ui: State<Ui>, root: String) {
 #[tauri::command(async)]
 fn set_setting(app: AppHandle, ui: State<Ui>, name: String, value: serde_json::Value) -> Result<(), String> {
     match name.as_str() {
+        "update_hours" => {
+            let mut c = ui.shared.cfg.lock().unwrap();
+            c.set_hours(&value);
+            c.save();
+            drop(c);
+            let _ = app.emit("settings", ());
+        }
         "auto_update" => {
             let mut c = ui.shared.cfg.lock().unwrap();
             c.auto_update = value.as_bool().unwrap_or(true);
@@ -857,14 +871,27 @@ fn open_addons_folder(app: AppHandle, ui: State<Ui>, install: String) -> Result<
 // ---------------------------------------------------------------------------------------------------------------
 // Background
 
-/// Refresh the catalog now and then every hour; when automatic updates are on, update what we installed.
+/// Refresh the catalog soon after start and then every `update_hours` (the player's setting, at least an hour); when
+/// automatic updates are on, update what we installed. A changed interval counts from the last check, without a
+/// restart.
 fn spawn_hourly(app: AppHandle) {
     std::thread::spawn(move || {
-        let mut wait = Duration::from_secs(5);
+        let started = Instant::now();
+        let mut last: Option<Instant> = None;
         let mut first = true;
         loop {
-            std::thread::sleep(wait);
-            wait = HOURLY;
+            let hours = app.state::<Ui>().shared.cfg.lock().unwrap().hours();
+            let due = match last {
+                None => started + Duration::from_secs(5),
+                Some(t) => t + Duration::from_secs(u64::from(hours) * 3600),
+            };
+            let now = Instant::now();
+            if now < due {
+                // look at the setting again now and then, so a new interval takes effect
+                std::thread::sleep((due - now).min(Duration::from_secs(15)));
+                continue;
+            }
+            last = Some(now);
             let ui = app.state::<Ui>();
             // the window may have just loaded it
             if !(first && ui.catalog().is_some()) {

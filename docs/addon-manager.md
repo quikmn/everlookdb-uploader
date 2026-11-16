@@ -5,7 +5,7 @@ The EverlookDB Uploader becomes the **EverlookDB App**: a small, gorgeous, ad-fr
 1. finds every World of Warcraft install and shows clearly which game version each one is,
 2. lists the addons in each, with their versions and whether an update is waiting,
 3. searches every addon we are allowed to offer, and installs, updates and removes them,
-4. updates by itself about once an hour (one switch to turn it off),
+4. updates by itself every hour, or as often as the player sets (1 to 168 hours; one switch to turn it off),
 5. keeps doing what the Uploader does: sends EverlookDB / EverlookDB Auctions data to everlookdb.com.
 
 Principles: the player first. No ads, no accounts, no tracking, nothing in the background except the hourly

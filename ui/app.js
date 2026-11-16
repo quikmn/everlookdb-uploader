@@ -91,6 +91,7 @@ function renderRail() {
 
 function renderSettings() {
   $('sw-auto').checked = S.app.auto_update;
+  showHours(S.app.update_hours);
   $('sw-start').checked = S.app.autostart;
   $('start-label').textContent = S.app.autostart_label;
   $('app-version').textContent = `EverlookDB ${S.app.version}`;
@@ -737,6 +738,49 @@ document.addEventListener('keydown', (e) => {
 });
 
 $('sw-auto').addEventListener('change', (e) => invoke('set_setting', { name: 'auto_update', value: e.target.checked }));
+
+// ------------------------------------------------------------------------------------------------ update interval
+
+function clampHours(v) {
+  const n = Math.round(Number(String(v).trim()));
+  if (!Number.isFinite(n)) return null;
+  return Math.min(S.app.max_hours, Math.max(S.app.min_hours, n));
+}
+
+function showHours(h) {
+  if (document.activeElement !== $('hours')) $('hours').value = String(h);
+  $('hours-unit').textContent = h === 1 ? 'hour' : 'hours';
+  $('hours-less').disabled = h <= S.app.min_hours;
+  $('hours-more').disabled = h >= S.app.max_hours;
+}
+
+// typed text that isn't a number goes back to the setting; anything else is kept in range and saved
+function setHours(v) {
+  const h = clampHours(v) ?? S.app.update_hours;
+  $('hours').value = String(h);
+  showHours(h);
+  if (h === S.app.update_hours) return;
+  S.app.update_hours = h;
+  invoke('set_setting', { name: 'update_hours', value: h }).catch((e) => showError(String(e)));
+}
+
+$('hours-less').addEventListener('click', () => setHours(S.app.update_hours - 1));
+$('hours-more').addEventListener('click', () => setHours(S.app.update_hours + 1));
+$('hours').addEventListener('blur', (e) => setHours(e.target.value));
+$('hours').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    setHours(e.target.value);
+    e.target.select();
+  } else if (e.key === 'Escape') {
+    e.target.value = String(S.app.update_hours);
+    e.target.blur();
+  } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    e.preventDefault();
+    setHours((clampHours(e.target.value) ?? S.app.update_hours) + (e.key === 'ArrowUp' ? 1 : -1));
+    e.target.select();
+  }
+});
 $('sw-start').addEventListener('change', (e) => invoke('set_setting', { name: 'autostart', value: e.target.checked }));
 $('sw-uploads').addEventListener('change', (e) => invoke('set_setting', { name: 'paused', value: !e.target.checked }));
 $('upload-now').addEventListener('click', () => {

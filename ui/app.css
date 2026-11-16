@@ -209,6 +209,52 @@ button { cursor: pointer; }
 .switch input:focus-visible + .track { outline: 2px solid var(--sky); outline-offset: 2px; }
 .switch:hover .switch-label { color: var(--ink); }
 
+/* "Check every [ 1 ] hours", under the automatic updates switch */
+.every {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 2px 40px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.stepper {
+  display: inline-flex;
+  align-items: stretch;
+  height: 24px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-s);
+  background: var(--raise);
+  overflow: hidden;
+}
+.stepper:focus-within { border-color: var(--sky); }
+.stepper button {
+  width: 18px;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1;
+}
+.stepper button:hover:not(:disabled) { color: var(--ink); background: var(--raise-2); }
+.stepper button:disabled { color: var(--line-2); cursor: default; }
+.stepper input {
+  width: 28px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: center;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+  user-select: text;
+}
+
 .text-button {
   justify-self: start;
   border: 0;
