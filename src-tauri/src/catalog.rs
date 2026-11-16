@@ -54,9 +54,24 @@ pub struct File {
 }
 
 impl Addon {
-    /// The file for an install that accepts these flavors (best first).
+    /// The file for an install that accepts these flavors (best first). When several files fit a flavor (Pawn ships
+    /// `Pawn-…-Forever.zip` beside a main zip that also lists Forever), the one built for it wins: its name says the
+    /// flavor, then the one made for the fewest flavors.
     pub fn file_for(&self, accepts: &[String]) -> Option<&File> {
-        accepts.iter().find_map(|f| self.files.iter().find(|file| file.flavors.iter().any(|x| x == f)))
+        accepts.iter().find_map(|f| {
+            let word = match f.as_str() {
+                "classic_era" => "vanilla",
+                "retail" => "mainline",
+                other => other,
+            };
+            self.files
+                .iter()
+                .filter(|file| file.flavors.iter().any(|x| x == f))
+                .min_by_key(|file| {
+                    let name = file.name.to_ascii_lowercase();
+                    (!(name.contains(f.as_str()) || name.contains(word)), file.flavors.len())
+                })
+        })
     }
 }
 
@@ -180,5 +195,22 @@ mod tests {
         assert!(wa.file_for(&["forever".into()]).is_none());
         assert!(wa.file_for(&["ptr".into(), "classic".into()]).is_some());
         assert!(c.addons.iter().any(|a| a.ours));
+    }
+
+    #[test]
+    fn prefers_the_file_built_for_the_flavor() {
+        let file = |name: &str, flavors: &[&str]| File {
+            flavors: flavors.iter().map(|s| s.to_string()).collect(),
+            interfaces: vec![],
+            url: format!("https://example.test/{name}"),
+            name: name.into(),
+            size: 1,
+        };
+        let pawn = Addon {
+            files: vec![file("Pawn-2.14.3.zip", &["retail", "classic", "forever"]), file("Pawn-2.14.3-Forever.zip", &["forever"])],
+            ..serde_json::from_str(r#"{"id":"github:VgerMods/Pawn","name":"Pawn"}"#).unwrap()
+        };
+        assert_eq!(pawn.file_for(&["forever".into()]).unwrap().name, "Pawn-2.14.3-Forever.zip");
+        assert_eq!(pawn.file_for(&["retail".into()]).unwrap().name, "Pawn-2.14.3.zip");
     }
 }
