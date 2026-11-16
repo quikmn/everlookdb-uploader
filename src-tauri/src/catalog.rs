@@ -41,6 +41,9 @@ pub struct Addon {
     /// a square picture the source gives for the addon (https), when the catalog has one
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub icon: String,
+    /// `version` as the window shows it (see `version_label`); set by `fetch`
+    #[serde(default, skip_deserializing)]
+    pub version_label: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -120,8 +123,53 @@ fn sample() -> Option<Catalog> {
     }
 }
 
-/// Fetch the catalog (If-None-Match with the cached copy's ETag), falling back to the cache, then (dev builds) the sample.
+/// A release name as a version to show: "Pawn-2.14.3" -> "2.14.3", "Plater-v664" -> "v664", "Classic-0.1.1" ->
+/// "0.1.1", "120100.151-Release" -> "120100.151", "bundle/v12.9.0+v1.1.1" -> "v12.9.0". A word in front (the
+/// addon's name, a flavor) and a "release" word at the end go; the rest stays as the author wrote it.
+pub fn version_label(raw: &str) -> String {
+    let mut v = raw.trim();
+    // a tag path ("bundle/v12.9.0") and build metadata ("+v1.1.1")
+    v = v.rsplit('/').next().unwrap_or(v);
+    v = v.split('+').next().unwrap_or(v).trim();
+    // "-Release", "_release", " release" at the end
+    for sep in ['-', '_', ' ', '.'] {
+        if let Some((head, tail)) = v.rsplit_once(sep) {
+            if tail.eq_ignore_ascii_case("release") && !head.is_empty() {
+                v = head;
+                break;
+            }
+        }
+    }
+    // words in front, up to the first part that starts with a number (or v and a number)
+    let starts_number = |s: &str| {
+        let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+        s.chars().next().is_some_and(|c| c.is_ascii_digit())
+    };
+    let mut rest = v;
+    while !starts_number(rest) {
+        let Some((word, tail)) = rest.split_once(['-', '_', ' ']) else { break };
+        if word.is_empty() || !word.chars().all(|c| c.is_alphanumeric() || c == '.') || word.chars().any(|c| c.is_ascii_digit()) {
+            break;
+        }
+        rest = tail.trim_start();
+    }
+    if starts_number(rest) {
+        v = rest;
+    }
+    if v.is_empty() { raw.trim().to_string() } else { v.to_string() }
+}
+
+/// Fetch the catalog (If-None-Match with the cached copy's ETag), falling back to the cache, then (dev builds) the
+/// sample. Each addon's `version_label` is filled in.
 pub fn fetch(server: &str) -> (Option<Catalog>, Origin) {
+    let (mut c, origin) = fetch_any(server);
+    for a in c.iter_mut().flat_map(|c| c.addons.iter_mut()) {
+        a.version_label = version_label(&a.version);
+    }
+    (c, origin)
+}
+
+fn fetch_any(server: &str) -> (Option<Catalog>, Origin) {
     let target = url(server);
     // a local file, for testing: EVERLOOKDB_CATALOG=C:\path\catalog.json
     if !target.starts_with("http") {
@@ -198,6 +246,33 @@ mod tests {
         assert!(wa.file_for(&["forever".into()]).is_none());
         assert!(wa.file_for(&["ptr".into(), "classic".into()]).is_some());
         assert!(c.addons.iter().any(|a| a.ours));
+    }
+
+    #[test]
+    fn version_labels() {
+        for (raw, shown) in [
+            ("120100.151-Release", "120100.151"),
+            ("120100.100-release", "120100.100"),
+            ("r274-release", "r274"),
+            ("Plater-v664", "v664"),
+            ("Pawn-2.14.3", "2.14.3"),
+            ("Classic-0.1.1", "0.1.1"),
+            ("bundle/v12.9.0+v1.1.1", "v12.9.0"),
+            ("v427.9", "v427.9"),
+            ("4.18.4.1", "4.18.4.1"),
+            ("v11.2.5-1.0.0", "v11.2.5-1.0.0"),
+            ("v4.3.9-classic", "v4.3.9-classic"),
+            ("2.9.0-RC4", "2.9.0-RC4"),
+            ("v1.8.7-c", "v1.8.7-c"),
+            ("12.1.5-04", "12.1.5-04"),
+            ("r835", "r835"),
+            ("v2026.42.1", "v2026.42.1"),
+            ("Release", "Release"),
+            ("beta", "beta"),
+            ("", ""),
+        ] {
+            assert_eq!(version_label(raw), shown, "{raw}");
+        }
     }
 
     #[test]

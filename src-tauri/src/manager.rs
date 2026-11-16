@@ -8,7 +8,7 @@
 
 use crate::addons::{self, Folder};
 use crate::icons;
-use crate::catalog::{Addon, Catalog};
+use crate::catalog::{version_label, Addon, Catalog};
 use crate::config;
 use crate::wow::Install;
 use serde::{Deserialize, Serialize};
@@ -115,6 +115,9 @@ pub struct Item {
     pub managed: bool,
     pub ours: bool,
     pub latest: Option<String>,
+    /// `version` and `latest` as the window shows them ("Plater-v664" -> "v664"; catalog::version_label)
+    pub version_label: Option<String>,
+    pub latest_label: Option<String>,
     pub update: bool,
     pub previous: Option<String>,
     pub url: Option<String>,
@@ -204,11 +207,13 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                 name,
                 author: entry.map(|a| a.author.clone()).filter(|a| !a.is_empty()).or(toc.author.clone()),
                 notes: entry.map(|a| a.summary.clone()).filter(|s| !s.is_empty()).or(toc.notes.clone()),
+                version_label: version.as_deref().map(version_label),
                 version,
                 folders: g.folders.clone(),
                 catalog: entry.is_some(),
                 managed: record.is_some(),
                 ours: entry.is_some_and(|a| a.ours),
+                latest_label: latest.as_deref().map(version_label),
                 latest,
                 previous: record.and_then(|r| r.previous.as_ref().filter(|p| p.zip.is_file()).map(|p| p.version.clone())),
                 url: entry.map(|a| a.url.clone()).or(toc.website.clone()),
@@ -601,8 +606,15 @@ pub fn remove(install: &Install, id: &str) -> Result<String, String> {
     Ok(rec.name)
 }
 
-/// The addons we installed in `install` that have a newer version in the catalog.
+/// Why nothing is installed or updated in a folder without the game (leftover files of an uninstalled game).
+pub const NO_GAME: &str = "This game isn't installed here (only leftover files), so EverlookDB doesn't install or update addons in it.";
+
+/// The addons we installed in `install` that have a newer version in the catalog. None when the game isn't there:
+/// nothing is downloaded into a folder no game uses.
 pub fn pending<'a>(install: &Install, catalog: &'a Catalog) -> Vec<&'a Addon> {
+    if !install.game {
+        return Vec::new();
+    }
     let records = Records::load().of(&install.id);
     records
         .iter()
@@ -825,7 +837,10 @@ mod tests {
         let root = d.join("World of Warcraft");
         let dir = root.join("_forever_");
         std::fs::create_dir_all(dir.join("Interface").join("AddOns")).unwrap();
-        let install = crate::wow::installs_in(&root).pop().unwrap();
+        let mut install = crate::wow::installs_in(&root).pop().unwrap();
+        // a temp folder has no game in it; pretend it has, or nothing would be updated
+        assert!(pending(&install, &Catalog::default()).is_empty());
+        install.game = true;
         let file = |name: &str, size: u64| CFile {
             flavors: vec!["forever".into()],
             url: format!("https://github.com/quikmn/EverlookDB/releases/download/v0.1.3/{name}"),

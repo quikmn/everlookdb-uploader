@@ -148,6 +148,7 @@ function renderList() {
     return;
   }
   list.innerHTML = S.tab === 'mine' ? mineHtml(i) : browseHtml(i);
+  fitVersions(list);
   $('list-tools').hidden = S.tab !== 'mine' || !S.items.length;
   paintProgress();
   watchIcons();
@@ -245,6 +246,10 @@ function mineHtml(i) {
       .sort((a, b) => b.s - a.s)
       .map((x) => x.it);
   }
+  if (!S.items.length && !i.game) {
+    return `<div class="empty"><h3>${esc(i.name)} isn’t installed here</h3>
+      <p>Only leftover files are in this folder, so there are no addons to show or install.</p></div>`;
+  }
   if (!S.items.length) {
     return `<div class="empty"><h3>No addons in ${esc(i.name)} yet</h3>
       <p>Find boss mods, bag addons, unit frames and more, and install them with one click.</p>
@@ -255,7 +260,7 @@ function mineHtml(i) {
       <p>It may be in the addon list.</p>
       <button class="btn gold" type="button" data-act="tab" data-tab="browse">Search all addons for “${esc(q)}”</button></div>`;
   }
-  const updates = S.items.filter((it) => it.update && it.managed);
+  const updates = i.game ? S.items.filter((it) => it.update && it.managed) : [];
   const bar =
     updates.length && !q
       ? `<div class="updates-bar"><p>${plural(updates.length, 'update', 'updates')} ready</p>
@@ -324,12 +329,32 @@ function paintProgress() {
   }
 }
 
+// a version as people read it ("v664", not "Plater-v664"); what the author wrote is in the tooltip
+function versionCell(raw, label, what) {
+  const shown = label || raw || '';
+  const tip = raw && raw !== shown ? `${what}: ${raw}` : what;
+  return `<div class="row-version" title="${esc(tip)}">${esc(shown)}</div>`;
+}
+
+// the version column fits the longest version shown, so no version is ever cut; the description gives way
+function fitVersions(list) {
+  let longest = 0;
+  for (const el of list.querySelectorAll('.row-version')) longest = Math.max(longest, el.textContent.length);
+  list.style.setProperty('--ver', `max(${matchMedia('(max-width: 900px)').matches ? 90 : 110}px, ${longest + 1}ch)`);
+}
+
+// a folder with leftover files but no game: nothing is downloaded into it
+const NO_GAME = 'This game isn’t installed here (only leftover files), so EverlookDB doesn’t install or update addons in it.';
+const noGame = () => `<span class="state nogame" title="${esc(NO_GAME)}">Game not installed</span>`;
+
 function mineRow(it, i) {
   const key = it.key;
   const open = S.open.has(key);
   let action;
-  if (it.update && it.catalog) {
-    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}>Update to ${esc(it.latest)}</button>`;
+  if (!i.game && it.update && it.catalog) {
+    action = noGame();
+  } else if (it.update && it.catalog) {
+    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}>Update to ${esc(it.latest_label || it.latest)}</button>`;
   } else if (it.catalog && it.latest) {
     action = `<span class="state ok">${CHECK}Up to date</span>`;
   } else if (it.catalog) {
@@ -345,7 +370,7 @@ function mineRow(it, i) {
         <span class="row-name"><span class="t">${esc(it.name)}</span>${oursMark(it.ours)}</span>
         <span class="row-meta">${meta || '&nbsp;'}</span>
       </button>
-      <div class="row-version" title="Installed version">${esc(it.version || '')}</div>
+      ${versionCell(it.version, it.version_label, 'Installed version')}
       <div class="row-action">${action}</div>
     </div>
     ${open ? mineMore(it, i) : ''}
@@ -358,10 +383,10 @@ function mineMore(it, i) {
   const page = it.ours && ourPage(it.key);
   if (page) actions.push(`<button class="link-button" type="button" data-act="url" data-url="${page}">About it on everlookdb.com</button>`);
   if (it.url && it.url.startsWith('https://')) actions.push(`<button class="link-button" type="button" data-act="url" data-url="${esc(it.url)}">${page ? 'Source' : 'Project page'}</button>`);
-  if (it.managed && it.previous) {
+  if (it.managed && it.previous && i.game) {
     actions.push(`<button class="btn" type="button" data-act="rollback" data-id="${esc(key)}" ${busyAttrs(key)}>Go back to ${esc(it.previous)}</button>`);
   }
-  if (it.catalog && !it.managed && it.latest && !it.update) {
+  if (it.catalog && !it.managed && it.latest && !it.update && i.game) {
     actions.push(`<button class="btn" type="button" data-act="install" data-id="${esc(key)}" data-take="1" ${busyAttrs(key)} title="Reinstalls it from its source; the copy there now is kept in EverlookDB's backups folder">Keep it updated with EverlookDB</button>`);
   }
   if (it.managed) {
@@ -421,10 +446,12 @@ function browseHtml(i) {
 
 function browseRow(a, i, it, runs) {
   let action;
-  if (!runs) {
+  if (!i.game) {
+    action = it ? `<span class="state ok">${CHECK}Installed</span>` : noGame();
+  } else if (!runs) {
     action = `<span class="state">Not for ${esc(i.name)}</span>`;
   } else if (it && it.update) {
-    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version)}</button>`;
+    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version_label || a.version)}</button>`;
   } else if (it) {
     action = `<span class="state ok">${CHECK}Installed</span>`;
   } else {
@@ -439,7 +466,7 @@ function browseRow(a, i, it, runs) {
         <span class="row-name"><span class="t">${esc(a.name)}</span>${oursMark(a.ours)}</span>
         <span class="row-meta"><span class="author">${esc(a.author)}</span>&ensp;${esc(a.summary)}</span>
       </button>
-      <div class="row-version" title="Latest version">${esc(a.version)}</div>
+      ${versionCell(a.version, a.version_label, 'Latest version')}
       <div class="row-action">${action}</div>
     </div>
   </li>`;

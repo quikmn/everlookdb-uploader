@@ -715,6 +715,9 @@ async fn install_addon(app: AppHandle, install: String, id: String, take_over: V
     blocking(app, move |app| {
         let ui = app.state::<Ui>();
         let i = find_install(&ui, &install)?;
+        if !i.game {
+            return Err(manager::NO_GAME.into());
+        }
         let cat = ui.catalog().ok_or("The addon list hasn't loaded yet.")?;
         let addon = cat.get(&id).ok_or("That addon isn't in the list any more.")?;
         manager::install(&i, addon, &take_over, &mut |done, total| {
@@ -733,6 +736,9 @@ fn remove_addon(ui: State<Ui>, install: String, id: String) -> Result<String, St
 #[tauri::command(async)]
 fn rollback_addon(ui: State<Ui>, install: String, id: String) -> Result<manager::Change, String> {
     let i = find_install(&ui, &install)?;
+    if !i.game {
+        return Err(manager::NO_GAME.into());
+    }
     manager::rollback(&i, &id)
 }
 

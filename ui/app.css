@@ -479,7 +479,7 @@ button { cursor: pointer; }
 
 .row-main {
   display: grid;
-  grid-template-columns: var(--ico) minmax(0, 1fr) 110px 190px;
+  grid-template-columns: var(--ico) minmax(0, 1fr) var(--ver, 110px) 190px;
   align-items: center;
   gap: 16px;
   padding: 12px 4px 12px 0;
@@ -535,8 +535,6 @@ button { cursor: pointer; }
   font-variant-numeric: tabular-nums;
   font-size: 13px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .row-action { display: flex; justify-content: flex-end; }
 
@@ -554,6 +552,7 @@ button { cursor: pointer; }
 }
 .ours i { width: 5px; height: 5px; border-radius: 50%; background: var(--gold); }
 
+.state.nogame { cursor: help; }
 .state { font-size: 13px; color: var(--ink-3); white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
 .state.ok { color: var(--ink-2); }
 .state svg { width: 14px; height: 14px; fill: none; stroke: var(--ok); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -633,7 +632,7 @@ button { cursor: pointer; }
   .hero, .toolbar, .list, .status { padding-left: 22px; padding-right: 22px; }
   .notice { margin-left: 22px; margin-right: 22px; }
   :root { --ico: 32px; }
-  .row-main { grid-template-columns: var(--ico) minmax(0, 1fr) 90px 160px; gap: 14px; }
+  .row-main { grid-template-columns: var(--ico) minmax(0, 1fr) var(--ver, 90px) 160px; gap: 14px; }
   .hero-name, .hero-version .num { font-size: 32px; }
 }
 
