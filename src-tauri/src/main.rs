@@ -272,6 +272,14 @@ fn autostart() -> tauri_plugin_autostart::Builder {
 
 fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> {
     let paused = shared.cfg.lock().unwrap().paused;
+    // point the login item at this copy of the app (an update may have installed it somewhere new); only for the
+    // real app, never a development or test run, which would take over the player's login item
+    if !cfg!(debug_assertions) && std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_none_or(|v| v.is_empty()) {
+        let al = app.autolaunch();
+        if al.is_enabled().unwrap_or(false) {
+            let _ = al.enable();
+        }
+    }
     let status = MenuItem::with_id(app, "status", "Starting…", false, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "", false, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(app, "autostart", AUTOSTART, true, app.autolaunch().is_enabled().unwrap_or(false), None::<&str>)?;
