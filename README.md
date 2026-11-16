@@ -25,7 +25,10 @@ Download the latest release from the [releases page](https://github.com/quikmn/e
 - **Windows:** the `_x64-setup.exe`. It installs for your user only (no administrator prompt).
 - **macOS:** the `_universal.dmg` (Apple silicon and Intel). Drag it to Applications.
 
-If you have the EverlookDB Uploader, it updates itself into this app; your settings stay.
+If you have the EverlookDB Uploader, it updates itself into this app; your settings stay. On Windows the new installer
+removes the old "EverlookDB Uploader" install (its folder, Start menu and desktop shortcuts and its entry in Installed
+apps) and puts the same shortcuts and the Start with Windows setting back for EverlookDB. On macOS the update replaces
+the app where it is, so it keeps its old name in Applications (`EverlookDB Uploader.app`) until you install it fresh.
 
 ## What it touches
 
@@ -99,7 +102,8 @@ The last one builds an unsigned installer into `src-tauri/target/release/bundle/
 Layout: `src-tauri/src/wow.rs` finds the games and versions, `addons.rs` reads `.toc` files and groups folders,
 `catalog.rs` fetches and caches the addon catalog, `manager.rs` installs, updates, rolls back and removes,
 `worker.rs` watches and uploads, `config.rs` keeps settings, `main.rs` is the tray, the window and the commands the
-window calls. `ui/` is the window: plain HTML, CSS and JavaScript, no build step. Icons are generated from
+window calls. `src-tauri/windows/hooks.nsh` is the Windows installer's hook that moves an old "EverlookDB Uploader"
+install over (its `EDB_OLD_*` names can be overridden to test it against a fake old install). `ui/` is the window: plain HTML, CSS and JavaScript, no build step. Icons are generated from
 `assets/app-icon.svg` with `cargo tauri icon assets/app-icon.svg -o src-tauri/icons`; the macOS menu bar icon is
 `assets/tray-template.svg` rendered to `src-tauri/icons/tray-template.png`. Fonts are the system's own (Segoe UI on Windows, San Francisco on macOS).
 
