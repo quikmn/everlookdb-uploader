@@ -1,9 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <!-- macOS menu bar icon (a template image: black on transparent; macOS recolors it). -->
-  <g fill="#000">
-    <rect x="232" y="112" width="160" height="800" rx="28"/>
-    <rect x="232" y="112" width="580" height="160" rx="28"/>
-    <rect x="232" y="432" width="480" height="160" rx="28"/>
-    <rect x="232" y="752" width="580" height="160" rx="28"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512">
+  <!-- macOS menu bar icon (a template image: black on transparent; macOS recolors it): the EverlookDB database mark,
+       its three discs cut apart by gaps, the gold dots as holes. Rendered to src-tauri/icons/tray-template.png. -->
+  <defs>
+    <mask id="cut">
+      <rect width="512" height="512" fill="#fff"/>
+      <g fill="#000"><circle cx="162" cy="186" r="13"/><circle cx="162" cy="272" r="13"/><circle cx="162" cy="358" r="13"/></g>
+    </mask>
+  </defs>
+  <g fill="#000" mask="url(#cut)" transform="translate(0 10)">
+    <path d="M128 300c0 22 57 40 128 40s128-18 128-40v62c0 22-57 40-128 40s-128-18-128-40z"/>
+    <path d="M128 214c0 22 57 40 128 40s128-18 128-40v62c0 22-57 40-128 40s-128-18-128-40z"/>
+    <path d="M128 128c0 22 57 40 128 40s128-18 128-40v62c0 22-57 40-128 40s-128-18-128-40z"/>
+    <ellipse cx="256" cy="128" rx="128" ry="40"/>
   </g>
 </svg>
