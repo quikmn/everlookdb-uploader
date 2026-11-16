@@ -59,7 +59,7 @@ button { cursor: pointer; }
 /* ----------------------------------------------------------------------------- rail */
 
 .rail {
-  background: var(--rail);
+  background: var(--rail) local; /* opaque and scrolling with it: GPU scrolling, see .list */
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -389,6 +389,10 @@ button { cursor: pointer; }
   overflow-y: auto;
   padding: 0 36px 24px;
   min-height: 0;
+  /* An opaque background that scrolls with the rows: at 100% display scaling Chromium (WebView2) only scrolls a box on
+     the GPU when it can tell the box is opaque; otherwise it repaints the list for every scroll step, and dragging
+     the scrollbar stutters. */
+  background: var(--night) local;
 }
 .list:focus { outline: none; }
 
