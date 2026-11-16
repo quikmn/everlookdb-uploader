@@ -81,9 +81,24 @@
         <input type="search" id="q" placeholder="Search addons" autocomplete="off" spellcheck="false" aria-label="Search addons">
         <kbd aria-hidden="true">/</kbd>
       </div>
+      <div class="list-tools" id="list-tools" hidden>
+        <button class="tool" type="button" data-act="copy-list" id="copy-list" title="Copy every installed addon as text: name, version, author, folders and where it comes from">
+          <svg class="i-copy" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>
+          <svg class="i-done" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>
+          <span id="copy-label">Copy list</span>
+        </button>
+        <button class="tool more" type="button" data-act="list-menu" id="list-menu-button" aria-haspopup="menu" aria-expanded="false" aria-controls="list-menu" title="More ways to share the list">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.5l3.5 3.5 3.5-3.5"/></svg>
+        </button>
+        <div class="menu" id="list-menu" role="menu" hidden>
+          <button type="button" role="menuitem" data-act="copy-list">Copy addon list</button>
+          <button type="button" role="menuitem" data-act="save-list">Save as text file…</button>
+        </div>
+      </div>
     </div>
 
     <div class="notice" id="notice" role="status" hidden></div>
+    <p class="sr-only" id="announce" aria-live="polite"></p>
 
     <div class="list" id="list" role="tabpanel" aria-labelledby="tab-mine"></div>
 

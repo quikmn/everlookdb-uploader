@@ -320,6 +320,61 @@ button { cursor: pointer; }
 .tabs button[aria-selected='true'] { color: var(--ink); background: var(--raise-2); }
 .count { font-weight: 400; color: var(--ink-3); margin-left: 4px; font-variant-numeric: tabular-nums; }
 
+/* "Copy list" and its menu, on My addons */
+.list-tools {
+  position: relative;
+  display: flex;
+  margin-left: -8px;
+}
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  border: 1px solid var(--line-2);
+  background: var(--night);
+  color: var(--ink-2);
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--r-m) 0 0 var(--r-m);
+  white-space: nowrap;
+}
+.tool + .tool { border-left: 0; border-radius: 0 var(--r-m) var(--r-m) 0; padding: 0 8px; }
+.tool:hover { color: var(--ink); background: var(--raise); }
+.tool svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.tool.more svg { width: 13px; height: 13px; stroke-width: 1.7; }
+.tool .i-done, .tool.done .i-copy { display: none; }
+.tool.done .i-done { display: block; }
+#copy-list { min-width: 104px; justify-content: center; }
+.tool.done { color: var(--ok); }
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  min-width: 190px;
+  padding: 5px;
+  display: grid;
+  background: var(--raise);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-m);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  animation: drop 0.12s ease-out;
+}
+.menu button {
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: var(--r-s);
+  font-size: 13px;
+  color: var(--ink);
+}
+.menu button:hover, .menu button:focus-visible { background: var(--raise-2); outline: none; }
+
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; margin: 0; }
+
 .search {
   flex: 1;
   max-width: 460px;

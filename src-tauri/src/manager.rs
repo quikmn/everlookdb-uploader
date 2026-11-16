@@ -121,6 +121,9 @@ pub struct Item {
     /// the texture its .toc names as its icon, when that is a file in AddOns (the window asks for it separately)
     #[serde(skip)]
     pub icon_file: Option<PathBuf>,
+    /// where it comes from, for the copied addon list: (label, value)
+    #[serde(skip)]
+    pub links: Vec<(&'static str, String)>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -180,7 +183,21 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                 .chain(g.folders.iter().map(String::as_str).filter(|f| *f != g.main))
                 .filter_map(|f| by_name.get(f).map(|x| &x.toc))
                 .collect();
+            let first = |get: fn(&addons::Toc) -> &Option<String>| tocs.iter().find_map(|t| get(t).clone());
             let icon_file = tocs.iter().find_map(|t| t.icon.as_deref().and_then(|v| icons::resolve(&install.addons_dir, v)));
+            let website = first(|t| &t.website);
+            let mut links: Vec<(&'static str, String)> = Vec::new();
+            if let Some(w) = &website {
+                links.push(("website", w.clone()));
+            }
+            if let Some(src) = entry.map(|a| a.url.clone()).filter(|u| !u.is_empty() && Some(u) != website.as_ref()) {
+                links.push(("source", src));
+            }
+            for (label, value) in [("CurseForge", first(|t| &t.curse_id)), ("WoWInterface", first(|t| &t.wowi_id)), ("Wago", first(|t| &t.wago_id))] {
+                if let Some(v) = value {
+                    links.push((label, v));
+                }
+            }
             Item {
                 key: g.key.clone().unwrap_or_else(|| format!("folder:{}", g.main)),
                 update: latest.as_deref().is_some_and(|l| differs(version.as_deref(), l)),
@@ -196,11 +213,42 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                 previous: record.and_then(|r| r.previous.as_ref().filter(|p| p.zip.is_file()).map(|p| p.version.clone())),
                 url: entry.map(|a| a.url.clone()).or(toc.website.clone()),
                 icon_file,
+                links,
             }
         })
         .collect();
     items.sort_by_key(|i| (!i.update, i.name.to_ascii_lowercase()));
     items
+}
+
+/// The installed addons as plain text, one per line: name, version, author, folders, and where each comes from
+/// (X-Website, the catalog's source, CurseForge / WoWInterface / Wago ids). For pasting in a chat or keeping.
+pub fn export_text(install: &Install, items: &[Item], date: &str) -> String {
+    let game = match &install.version {
+        Some(v) => format!("{} {v}", install.name),
+        None => install.name.clone(),
+    };
+    let n = items.len();
+    let mut out = format!("{game}: {n} addon{}, listed by EverlookDB on {date}\n\n", if n == 1 { "" } else { "s" });
+    let mut sorted: Vec<&Item> = items.iter().collect();
+    sorted.sort_by_key(|i| i.name.to_ascii_lowercase());
+    for it in sorted {
+        let mut line = it.name.clone();
+        // some titles carry the version already ("Titan Panel [_Core_] 9.3.6")
+        if let Some(v) = it.version.as_deref().filter(|v| !v.is_empty() && !it.name.ends_with(v)) {
+            line += &format!(" {v}");
+        }
+        if let Some(a) = it.author.as_deref().filter(|a| !a.is_empty()) {
+            line += &format!(" by {a}");
+        }
+        line += &format!(" | folder{}: {}", if it.folders.len() == 1 { "" } else { "s" }, it.folders.join(", "));
+        for (label, value) in &it.links {
+            line += &format!(" | {label}: {value}");
+        }
+        out += line.replace(['\r', '\n'], " ").trim_end();
+        out.push('\n');
+    }
+    out
 }
 
 fn short_hash(s: &str) -> String {
@@ -736,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn icon_files() {
+    fn icons_links_and_the_addon_list() {
         let d = tmp("export");
         let root = d.join("World of Warcraft");
         let addons_dir = root.join("_forever_").join("Interface").join("AddOns");
@@ -753,8 +801,17 @@ mod tests {
         let items = list(&install, None);
         let titan = items.iter().find(|i| i.name == "Titan Panel").unwrap();
         assert_eq!(titan.icon_file.as_deref(), Some(addons_dir.join("Titan").join("Artwork").join("Titan.tga").as_path()));
+        assert_eq!(titan.links, vec![("website", "https://titanpanel.example".to_string()), ("CurseForge", "489".into()), ("Wago", "abc".into())]);
         let plain = items.iter().find(|i| i.name == "Plain").unwrap();
         assert_eq!(plain.icon_file, None);
+
+        let text = export_text(&install, &items, "2026-11-16");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], format!("{}: 2 addons, listed by EverlookDB on 2026-11-16", install.name));
+        assert_eq!(lines[1], "");
+        assert_eq!(lines[2], "Plain | folder: Plain");
+        assert_eq!(lines[3], "Titan Panel 9.3.6 by Titan Dev Team | folders: Titan, TitanBag | website: https://titanpanel.example | CurseForge: 489 | Wago: abc");
+        assert_eq!(lines.len(), 4);
         let _ = std::fs::remove_dir_all(&d);
     }
 

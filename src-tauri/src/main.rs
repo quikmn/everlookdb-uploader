@@ -254,6 +254,8 @@ fn run(args: Args) {
             open_url,
             open_addons_folder,
             addon_icons,
+            copy_addon_list,
+            save_addon_list,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -568,6 +570,96 @@ async fn addon_icons(app: AppHandle, install: String, keys: Vec<String>) -> Resu
         }))
     })
     .await
+}
+
+/// The install, its addon list as text, and how many addons are in it.
+fn addon_list_text(ui: &Ui, install: &str) -> Result<(wow::Install, String, usize), String> {
+    let i = find_install(ui, install)?;
+    let items = manager::list(&i, ui.catalog().as_deref());
+    let text = manager::export_text(&i, &items, &chrono::Local::now().format("%Y-%m-%d").to_string());
+    Ok((i, text, items.len()))
+}
+
+/// Copy the installed addons to the clipboard as plain text. Returns how many. (Done here rather than in the
+/// window: the WebView only lets a page write the clipboard while it has the focus.)
+#[tauri::command(async)]
+fn copy_addon_list(ui: State<Ui>, install: String) -> Result<usize, String> {
+    let (_, text, n) = addon_list_text(&ui, &install)?;
+    set_clipboard(&text)?;
+    Ok(n)
+}
+
+#[cfg(windows)]
+fn set_clipboard(text: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.replace('\n', "\r\n").encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        // another app may have it open for a moment
+        let mut open = false;
+        for _ in 0..20 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                open = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !open {
+            return Err("the clipboard is busy; try again".into());
+        }
+        let done = (|| {
+            if EmptyClipboard() == 0 {
+                return false;
+            }
+            let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+            if mem.is_null() {
+                return false;
+            }
+            let p = GlobalLock(mem) as *mut u16;
+            if p.is_null() {
+                windows_sys::Win32::Foundation::GlobalFree(mem);
+                return false;
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+            GlobalUnlock(mem);
+            // the clipboard owns the memory once this succeeds
+            if SetClipboardData(CF_UNICODETEXT, mem).is_null() {
+                windows_sys::Win32::Foundation::GlobalFree(mem);
+                return false;
+            }
+            true
+        })();
+        CloseClipboard();
+        if done { Ok(()) } else { Err("the clipboard didn't take it".into()) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    child.stdin.take().ok_or("no pbcopy")?.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    child.wait().map_err(|e| e.to_string()).map(|_| ())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn set_clipboard(_text: &str) -> Result<(), String> {
+    Err("copying isn't available here; save the list as a file instead".into())
+}
+
+/// Save the installed addons as a text file where the player chooses. Returns the file, or None (cancelled).
+#[tauri::command(async)]
+fn save_addon_list(app: AppHandle, ui: State<Ui>, install: String) -> Result<Option<String>, String> {
+    let (i, text, _) = addon_list_text(&ui, &install)?;
+    let name = format!("{} addons.txt", i.name).replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "");
+    let Some(picked) = app.dialog().file().set_title("Save the addon list").set_file_name(&name).add_filter("Text", &["txt"]).blocking_save_file() else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let text = if cfg!(windows) { text.replace('\n', "\r\n") } else { text };
+    std::fs::write(&path, text).map_err(|e| format!("Couldn't save {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
 }
 
 #[derive(Serialize)]

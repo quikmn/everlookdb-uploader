@@ -148,6 +148,7 @@ function renderList() {
     return;
   }
   list.innerHTML = S.tab === 'mine' ? mineHtml(i) : browseHtml(i);
+  $('list-tools').hidden = S.tab !== 'mine' || !S.items.length;
   paintProgress();
   watchIcons();
 }
@@ -575,6 +576,54 @@ async function onAction(el) {
     case 'dismiss':
       $('notice').hidden = true;
       break;
+    case 'list-menu':
+      return showListMenu($('list-menu').hidden);
+    case 'copy-list':
+      showListMenu(false);
+      return copyList();
+    case 'save-list':
+      showListMenu(false);
+      return saveList();
+  }
+}
+
+// ------------------------------------------------------------------------------------------------ addon list
+
+function showListMenu(open) {
+  $('list-menu').hidden = !open;
+  $('list-menu-button').setAttribute('aria-expanded', String(open));
+  if (open) $('list-menu').querySelector('[role="menuitem"]').focus();
+}
+
+let copiedTimer = 0;
+async function copyList() {
+  try {
+    const n = await invoke('copy_addon_list', { install: S.sel });
+    const said = `Copied ${plural(n, 'addon', 'addons')} to the clipboard`;
+    // a short label, so the toolbar doesn't move; the whole sentence for the tooltip and screen readers
+    const b = $('copy-list');
+    $('copy-label').textContent = 'Copied';
+    b.classList.add('done');
+    b.dataset.title ??= b.title;
+    b.title = said;
+    $('announce').textContent = said;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => {
+      $('copy-label').textContent = 'Copy list';
+      b.classList.remove('done');
+      b.title = b.dataset.title;
+    }, 2400);
+  } catch (e) {
+    showError(`Couldn’t copy the addon list: ${e}`);
+  }
+}
+
+async function saveList() {
+  try {
+    const path = await invoke('save_addon_list', { install: S.sel });
+    if (path) showChanges(`Saved the addon list as ${path.split(/[\\/]/).pop()}`, []);
+  } catch (e) {
+    showError(String(e));
   }
 }
 
@@ -615,6 +664,7 @@ async function selectInstall(id) {
 // ------------------------------------------------------------------------------------------------ wiring
 
 document.addEventListener('click', (e) => {
+  if (!$('list-menu').hidden && !e.target.closest('.list-tools')) showListMenu(false);
   const game = e.target.closest('[data-install]');
   if (game) return selectInstall(game.dataset.install);
   const el = e.target.closest('[data-act]');
@@ -646,6 +696,11 @@ $('q').addEventListener('keydown', (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('list-menu').hidden) {
+    showListMenu(false);
+    $('list-menu-button').focus();
+    return;
+  }
   const typing = e.target.matches('input[type="search"], input[type="text"]');
   if ((e.key === '/' && !typing) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f')) {
     e.preventDefault();
