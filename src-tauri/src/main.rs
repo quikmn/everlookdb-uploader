@@ -29,7 +29,7 @@ use tauri_plugin_updater::UpdaterExt;
 use worker::{Cmd, Kind, Shared, Status, Watcher};
 
 const DEFAULT_SERVER: &str = "https://everlookdb.com";
-const PRIVACY: &str = "Uploads only EverlookDB.lua and EverlookDBAuctions.lua; the site keeps just the game facts";
+const PRIVACY: &str = "Sends only the game facts in EverlookDB.lua and EverlookDBAuctions.lua";
 const AUTOSTART: &str = if cfg!(target_os = "macos") { "Open at login" } else { "Start with Windows" };
 /// how often the catalog is refreshed and (when on) addons are updated
 const HOURLY: Duration = Duration::from_secs(3600);
