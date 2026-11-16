@@ -1,38 +1,48 @@
-// EverlookDB Uploader: a tray app that uploads the EverlookDB addon's data file whenever the game
-// saves it, so players never have to upload it by hand on everlookdb.com/contribute.html.
+// EverlookDB: an ad-free addon manager for World of Warcraft that also uploads the EverlookDB addons' data files
+// whenever the game saves them, so players never have to upload them by hand on everlookdb.com/contribute.html.
+// It lives in the tray; the window opens from there and is closed (not hidden) when the player closes it.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod addons;
+mod catalog;
 mod config;
+mod manager;
 mod worker;
 mod wow;
 
+use catalog::{Catalog, Origin};
 use config::Config;
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, RunEvent, Wry};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, Wry};
+#[cfg(target_os = "macos")]
+use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
-use worker::{Cmd, Shared, Status, Watcher};
+use worker::{Cmd, Kind, Shared, Status, Watcher};
 
 const DEFAULT_SERVER: &str = "https://everlookdb.com";
 const PRIVACY: &str = "Sends only the game facts in EverlookDB.lua and EverlookDBAuctions.lua";
 const AUTOSTART: &str = if cfg!(target_os = "macos") { "Open at login" } else { "Start with Windows" };
-const HELP: &str = "EverlookDB Uploader: uploads the EverlookDB addon's data file to everlookdb.com whenever the game saves it.
+/// how often the catalog is refreshed and (when on) addons are updated
+const HOURLY: Duration = Duration::from_secs(3600);
+const HELP: &str = "EverlookDB: addon manager for World of Warcraft, and uploader of the EverlookDB addons' data to everlookdb.com.
 
 Usage: everlookdb-uploader [options]
   --server <url>   server to upload to (default https://everlookdb.com; or EVERLOOKDB_SERVER)
-  --wow <folder>   use (and remember) this WoW Forever folder
-  --check          print the folder and data files found, then exit
+  --wow <folder>   use (and remember) this WoW Forever folder for uploads
+  --check          print the installs, addons and data files found, then exit
   --once           upload every changed data file once, print the results, then exit
-  --background     start quietly (used at login)
+  --background     start quietly in the tray (used at login)
 Settings live in %APPDATA%\\com.everlookdb.uploader (macOS: ~/Library/Application Support/com.everlookdb.uploader),
-or EVERLOOKDB_UPLOADER_DIR.";
+or EVERLOOKDB_UPLOADER_DIR. EVERLOOKDB_CATALOG points the addon catalog elsewhere (a URL or a local file).";
 
 struct Args {
     server: String,
@@ -100,15 +110,33 @@ fn main() {
         attach_console();
         std::process::exit(command_line(&args));
     }
-    run_tray(args);
+    run(args);
 }
 
 /// --check and --once.
 fn command_line(args: &Args) -> i32 {
     let mut cfg = Config::load();
-    let dir = args.wow.as_deref().and_then(wow::resolve).or(cfg.wow_dir.clone().filter(|d| d.is_dir())).or_else(wow::find_install);
+    // development: what the window would get, as JSON (for designing the UI outside the app)
+    if std::env::var_os("EVERLOOKDB_DUMP").is_some() {
+        let (cat, _) = catalog::fetch(&args.server);
+        let installs = wow::all_installs(&cfg.extra_roots);
+        let items: std::collections::BTreeMap<String, Vec<manager::Item>> = installs.iter().map(|i| (i.id.clone(), manager::list(i, cat.as_ref()))).collect();
+        println!("{}", serde_json::json!({ "installs": installs, "items": items, "catalog": cat }));
+        return 0;
+    }
     println!("Server:      {}", worker::upload_url(&args.server));
     println!("Settings:    {}", config::dir().display());
+    for i in wow::all_installs(&cfg.extra_roots) {
+        let n = manager::list(&i, None).len();
+        println!(
+            "Install:     {} {}{} in {} ({n} addons)",
+            i.name,
+            i.version.as_deref().unwrap_or("(version unknown)"),
+            i.build.as_deref().map(|b| format!(" build {b}")).unwrap_or_default(),
+            i.dir.display()
+        );
+    }
+    let dir = args.wow.as_deref().and_then(wow::resolve).or(cfg.wow_dir.clone().filter(|d| d.is_dir())).or_else(wow::find_install);
     let Some(dir) = dir else {
         println!("WoW Forever folder: not found (pass --wow <folder>)");
         return 1;
@@ -129,10 +157,10 @@ fn command_line(args: &Args) -> i32 {
     let shared = Arc::new(Shared { cfg: Mutex::new(cfg), server: args.server.clone() });
     let status = Watcher::new(shared).pass(false, true);
     println!("Result:      {}", status.line);
-    if status.kind == worker::Kind::Ok || status.kind == worker::Kind::Idle { 0 } else { 2 }
+    if status.kind == Kind::Ok || status.kind == Kind::Idle { 0 } else { 2 }
 }
 
-/// Handles the tray menu needs after start-up.
+/// What the tray and the window share.
 struct Ui {
     status: MenuItem<Wry>,
     folder: MenuItem<Wry>,
@@ -140,46 +168,87 @@ struct Ui {
     pause: CheckMenuItem<Wry>,
     tx: Mutex<Sender<Cmd>>,
     shared: Arc<Shared>,
+    uploads: Mutex<UploadState>,
+    catalog: Mutex<CatalogState>,
+}
+
+#[derive(Serialize, Clone, Default)]
+struct UploadState {
+    line: String,
+    kind: &'static str,
+    accounts: usize,
+    folder: Option<String>,
+    paused: bool,
+}
+
+#[derive(Default)]
+struct CatalogState {
+    catalog: Option<Arc<Catalog>>,
+    origin: Option<Origin>,
+    checked: Option<String>,
 }
 
 impl Ui {
     fn send(&self, cmd: Cmd) {
         let _ = self.tx.lock().unwrap().send(cmd);
     }
+    fn catalog(&self) -> Option<Arc<Catalog>> {
+        self.catalog.lock().unwrap().catalog.clone()
+    }
 }
 
-fn run_tray(args: Args) {
+fn run(args: Args) {
     let mut cfg = Config::load();
-    let first_run = !Config::exists();
     if let Some(over) = args.wow.as_deref().and_then(wow::resolve) {
         cfg.wow_dir = Some(over);
     }
     if cfg.wow_dir.as_ref().is_none_or(|d| !d.is_dir()) {
-        cfg.wow_dir = wow::find_install();
+        cfg.wow_dir = cfg.extra_roots.iter().find_map(|r| wow::resolve(r)).or_else(wow::find_install);
     }
     cfg.save();
     let shared = Arc::new(Shared { cfg: Mutex::new(cfg), server: args.server.clone() });
     config::log(&format!("start {} (server {})", env!("CARGO_PKG_VERSION"), args.server));
 
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            message(app, "EverlookDB Uploader is already running. Find it in the tray, by the clock.", MessageDialogKind::Info);
-        }))
+    let mut builder = tauri::Builder::default();
+    // a test instance with its own settings folder may run next to the real one
+    if std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_none_or(|v| v.is_empty()) {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)));
+    }
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--background"])))
+        .plugin(autostart().build())
+        .invoke_handler(tauri::generate_handler![
+            get_state,
+            list_installed,
+            get_catalog,
+            install_addon,
+            remove_addon,
+            rollback_addon,
+            update_all,
+            add_folder,
+            forget_folder,
+            set_setting,
+            upload_now,
+            open_url,
+            open_addons_folder,
+        ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            setup(app.handle(), shared, first_run && !args.background)?;
+            setup(app.handle(), shared, !args.background)?;
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("start EverlookDB Uploader");
+        .expect("start EverlookDB");
     app.run(|app, event| match event {
-        // no windows: stay in the tray until Quit
+        // closing the window leaves the app in the tray until Quit
         RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+        RunEvent::WindowEvent { event: tauri::WindowEvent::Destroyed, .. } => {
+            #[cfg(target_os = "macos")]
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        }
         RunEvent::Exit => {
             if let Some(ui) = app.try_state::<Ui>() {
                 ui.send(Cmd::Quit);
@@ -189,7 +258,15 @@ fn run_tray(args: Args) {
     });
 }
 
-fn setup(app: &AppHandle, shared: Arc<Shared>, welcome: bool) -> tauri::Result<()> {
+/// The login item keeps the Uploader's name, so existing installs keep starting with Windows / at login.
+fn autostart() -> tauri_plugin_autostart::Builder {
+    let b = tauri_plugin_autostart::Builder::new().app_name("EverlookDB Uploader").arg("--background");
+    #[cfg(target_os = "macos")]
+    let b = b.macos_launcher(MacosLauncher::LaunchAgent);
+    b
+}
+
+fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> {
     let paused = shared.cfg.lock().unwrap().paused;
     let status = MenuItem::with_id(app, "status", "Starting…", false, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "", false, None::<&str>)?;
@@ -199,29 +276,46 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, welcome: bool) -> tauri::Result<(
     let menu = Menu::with_items(
         app,
         &[
+            &MenuItem::with_id(app, "window", "Open EverlookDB", true, None::<&str>)?,
+            &sep()?,
             &status,
             &folder,
             &sep()?,
             &MenuItem::with_id(app, "upload", "Upload now", true, None::<&str>)?,
-            &MenuItem::with_id(app, "open", "Open EverlookDB", true, None::<&str>)?,
+            &MenuItem::with_id(app, "site", "Open everlookdb.com", true, None::<&str>)?,
             &MenuItem::with_id(app, "change", "Change WoW folder…", true, None::<&str>)?,
             &sep()?,
             &autostart,
             &pause,
             &sep()?,
             &MenuItem::with_id(app, "privacy", PRIVACY, false, None::<&str>)?,
-            &MenuItem::with_id(app, "quit", "Quit EverlookDB Uploader", true, None::<&str>)?,
+            &MenuItem::with_id(app, "quit", "Quit EverlookDB", true, None::<&str>)?,
         ],
     )?;
-    let tray = TrayIconBuilder::with_id("main").menu(&menu).show_menu_on_left_click(true).tooltip("EverlookDB Uploader");
+    let tray = TrayIconBuilder::with_id("main").menu(&menu).show_menu_on_left_click(false).tooltip("EverlookDB");
     #[cfg(target_os = "macos")]
     let tray = tray.icon(tauri::include_image!("icons/tray-template.png")).icon_as_template(true);
     #[cfg(not(target_os = "macos"))]
     let tray = tray.icon(app.default_window_icon().cloned().expect("app icon"));
-    tray.on_menu_event(|app, e| on_menu(app, e.id.as_ref())).build(app)?;
+    tray.on_menu_event(|app, e| on_menu(app, e.id.as_ref()))
+        .on_tray_icon_event(|tray, e| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+                show_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
 
     let (tx, rx) = channel();
-    app.manage(Ui { status, folder, autostart, pause, tx: Mutex::new(tx), shared: shared.clone() });
+    app.manage(Ui {
+        status,
+        folder,
+        autostart,
+        pause,
+        tx: Mutex::new(tx),
+        shared: shared.clone(),
+        uploads: Mutex::new(UploadState { line: "Starting…".into(), kind: "idle", paused, ..Default::default() }),
+        catalog: Mutex::new(CatalogState::default()),
+    });
 
     let handle = app.clone();
     let mut last: Option<(String, usize, Option<PathBuf>)> = None;
@@ -236,47 +330,73 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, welcome: bool) -> tauri::Result<(
         })
     });
 
-    if shared_dir(app).is_none() {
-        message(app, "EverlookDB Uploader couldn't find WoW Forever. Choose your World of Warcraft folder (the one with _forever_ in it).", MessageDialogKind::Warning);
-        pick_folder(app);
-    } else if welcome {
-        message(
-            app,
-            &format!(
-                "EverlookDB Uploader is running in the tray.\n\nIt uploads EverlookDB.lua and EverlookDBAuctions.lua from\n{}\nwhenever the game saves it (log out or /reload).\n\n{PRIVACY}: no account or character names, no file paths.",
-                shared_dir(app).unwrap().display()
-            ),
-            MessageDialogKind::Info,
-        );
+    if show {
+        show_window(app);
     }
+    spawn_hourly(app.clone());
     spawn_updater(app.clone());
     Ok(())
 }
 
-fn shared_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.state::<Ui>().shared.cfg.lock().unwrap().wow_dir.clone()
+/// Show the window, creating it if it was closed.
+fn show_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    let built = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("EverlookDB")
+        .inner_size(1100.0, 740.0)
+        .min_inner_size(760.0, 520.0)
+        .theme(Some(tauri::Theme::Dark))
+        .background_color(tauri::window::Color(12, 20, 34, 255))
+        .center()
+        .build();
+    if let Err(e) = built {
+        config::log(&format!("window: {e}"));
+    }
 }
 
 fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
     let ui = app.state::<Ui>();
     let _ = ui.status.set_text(&s.line);
-    let folder = match (dir, s.files) {
-        (None, _) => "No WoW folder chosen".to_string(),
+    let folder = match (&dir, s.files) {
+        (None, _) => "No WoW Forever folder".to_string(),
         (Some(d), 1) => format!("Watching 1 account in {}", d.display()),
         (Some(d), n) => format!("Watching {n} accounts in {}", d.display()),
     };
     let _ = ui.folder.set_text(folder);
     if let Some(tray) = app.tray_by_id("main") {
-        let tip: String = format!("EverlookDB Uploader\n{}", s.line).chars().take(120).collect();
+        let tip: String = format!("EverlookDB\n{}", s.line).chars().take(120).collect();
         let _ = tray.set_tooltip(Some(tip));
     }
+    let state = UploadState {
+        line: s.line.clone(),
+        kind: match s.kind {
+            Kind::Idle => "idle",
+            Kind::Ok => "ok",
+            Kind::Busy => "busy",
+            Kind::Error => "error",
+            Kind::Paused => "paused",
+        },
+        accounts: s.files,
+        folder: dir.map(|d| d.display().to_string()),
+        paused: ui.shared.cfg.lock().unwrap().paused,
+    };
+    *ui.uploads.lock().unwrap() = state.clone();
+    let _ = app.emit("uploads", state);
 }
 
 fn on_menu(app: &AppHandle, id: &str) {
     let ui = app.state::<Ui>();
     match id {
+        "window" => show_window(app),
         "upload" => ui.send(Cmd::UploadNow),
-        "open" => {
+        "site" => {
             let _ = app.opener().open_url(format!("{}/contribute.html", ui.shared.server), None::<&str>);
         }
         "change" => pick_folder(app),
@@ -284,19 +404,27 @@ fn on_menu(app: &AppHandle, id: &str) {
             let al = app.autolaunch();
             let _ = if ui.autostart.is_checked().unwrap_or(false) { al.enable() } else { al.disable() };
             let _ = ui.autostart.set_checked(al.is_enabled().unwrap_or(false));
+            let _ = app.emit("settings", ());
         }
-        "pause" => {
-            let mut c = ui.shared.cfg.lock().unwrap();
-            c.paused = ui.pause.is_checked().unwrap_or(false);
-            c.save();
-            drop(c);
-            ui.send(Cmd::Wake);
-        }
+        "pause" => set_paused(app, ui.pause.is_checked().unwrap_or(false)),
         "quit" => app.exit(0),
         _ => {}
     }
 }
 
+fn set_paused(app: &AppHandle, paused: bool) {
+    let ui = app.state::<Ui>();
+    let mut c = ui.shared.cfg.lock().unwrap();
+    c.paused = paused;
+    c.save();
+    drop(c);
+    let _ = ui.pause.set_checked(paused);
+    ui.uploads.lock().unwrap().paused = paused;
+    ui.send(Cmd::Wake);
+    let _ = app.emit("settings", ());
+}
+
+/// The tray's "Change WoW folder…": which WoW Forever folder the uploader watches.
 fn pick_folder(app: &AppHandle) {
     let handle = app.clone();
     app.dialog().file().set_title("Choose your World of Warcraft folder").pick_folder(move |picked| {
@@ -308,17 +436,272 @@ fn pick_folder(app: &AppHandle) {
         let ui = handle.state::<Ui>();
         let mut c = ui.shared.cfg.lock().unwrap();
         c.wow_dir = Some(dir);
+        if let Some(root) = wow::root_of(&path) {
+            if !c.extra_roots.contains(&root) {
+                c.extra_roots.push(root);
+            }
+        }
         c.save();
         drop(c);
         ui.send(Cmd::Wake);
+        let _ = handle.emit("installs", ());
     });
 }
 
 fn message(app: &AppHandle, text: &str, kind: MessageDialogKind) {
-    app.dialog().message(text).title("EverlookDB Uploader").kind(kind).show(|_| {});
+    app.dialog().message(text).title("EverlookDB").kind(kind).show(|_| {});
 }
 
-/// Check for a new version a minute after start and then every hour; install it silently and restart.
+// ---------------------------------------------------------------------------------------------------------------
+// Commands the window calls
+
+#[derive(Serialize)]
+struct AppState {
+    version: &'static str,
+    installs: Vec<wow::Install>,
+    selected: Option<String>,
+    auto_update: bool,
+    autostart: bool,
+    autostart_label: &'static str,
+    uploads: UploadState,
+    catalog_origin: Option<Origin>,
+    checked: Option<String>,
+}
+
+fn installs(ui: &Ui) -> Vec<wow::Install> {
+    let extra = ui.shared.cfg.lock().unwrap().extra_roots.clone();
+    wow::all_installs(&extra)
+}
+
+fn find_install(ui: &Ui, id: &str) -> Result<wow::Install, String> {
+    installs(ui).into_iter().find(|i| i.id == id).ok_or_else(|| "That install isn't there any more.".to_string())
+}
+
+#[tauri::command(async)]
+fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
+    let list = installs(&ui);
+    let cfg = ui.shared.cfg.lock().unwrap().clone();
+    let selected = cfg.selected.filter(|s| list.iter().any(|i| &i.id == s)).or_else(|| {
+        // WoW Forever first: it is what EverlookDB is for
+        list.iter().find(|i| i.flavor == "forever").or(list.first()).map(|i| i.id.clone())
+    });
+    let cat = ui.catalog.lock().unwrap();
+    AppState {
+        version: env!("CARGO_PKG_VERSION"),
+        installs: list,
+        selected,
+        auto_update: cfg.auto_update,
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        autostart_label: AUTOSTART,
+        uploads: ui.uploads.lock().unwrap().clone(),
+        catalog_origin: cat.origin,
+        checked: cat.checked.clone(),
+    }
+}
+
+#[tauri::command(async)]
+fn list_installed(ui: State<Ui>, install: String) -> Result<Vec<manager::Item>, String> {
+    let i = find_install(&ui, &install)?;
+    Ok(manager::list(&i, ui.catalog().as_deref()))
+}
+
+#[derive(Serialize)]
+struct CatalogReply {
+    catalog: Option<Arc<Catalog>>,
+    origin: Option<Origin>,
+    checked: Option<String>,
+}
+
+/// The catalog; `refresh` fetches it again first.
+#[tauri::command]
+async fn get_catalog(app: AppHandle, refresh: bool) -> Result<CatalogReply, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        if refresh || ui.catalog.lock().unwrap().catalog.is_none() {
+            refresh_catalog(&ui);
+        }
+        let c = ui.catalog.lock().unwrap();
+        Ok(CatalogReply { catalog: c.catalog.clone(), origin: c.origin, checked: c.checked.clone() })
+    })
+    .await
+}
+
+/// Run file and network work (blocking reqwest) off the async runtime.
+async fn blocking<T: Send + 'static>(app: AppHandle, f: impl FnOnce(&AppHandle) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || f(&app)).await.map_err(|e| e.to_string())?
+}
+
+fn refresh_catalog(ui: &Ui) {
+    let (cat, origin) = catalog::fetch(&ui.shared.server);
+    let mut c = ui.catalog.lock().unwrap();
+    if let Some(cat) = cat {
+        c.catalog = Some(Arc::new(cat));
+    }
+    c.origin = Some(origin);
+    c.checked = Some(chrono::Local::now().format("%H:%M").to_string());
+}
+
+#[tauri::command]
+async fn install_addon(app: AppHandle, install: String, id: String, take_over: Vec<String>) -> Result<manager::Change, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        let i = find_install(&ui, &install)?;
+        let cat = ui.catalog().ok_or("The addon list hasn't loaded yet.")?;
+        let addon = cat.get(&id).ok_or("That addon isn't in the list any more.")?;
+        manager::install(&i, addon, &take_over)
+    })
+    .await
+}
+
+#[tauri::command(async)]
+fn remove_addon(ui: State<Ui>, install: String, id: String) -> Result<String, String> {
+    let i = find_install(&ui, &install)?;
+    manager::remove(&i, &id)
+}
+
+#[tauri::command(async)]
+fn rollback_addon(ui: State<Ui>, install: String, id: String) -> Result<manager::Change, String> {
+    let i = find_install(&ui, &install)?;
+    manager::rollback(&i, &id)
+}
+
+#[derive(Serialize, Clone)]
+struct Updated {
+    changes: Vec<manager::Change>,
+    failed: Vec<String>,
+}
+
+/// Update everything we installed, in one install or (None) every install.
+#[tauri::command]
+async fn update_all(app: AppHandle, install: Option<String>) -> Result<Updated, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        let cat = ui.catalog().ok_or("The addon list hasn't loaded yet.")?;
+        let targets: Vec<wow::Install> = match install {
+            Some(id) => vec![find_install(&ui, &id)?],
+            None => installs(&ui),
+        };
+        let mut out = Updated { changes: Vec::new(), failed: Vec::new() };
+        for i in targets {
+            let (c, f) = manager::update_all(&i, &cat);
+            out.changes.extend(c);
+            out.failed.extend(f);
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// Ask for a `World of Warcraft` folder and remember it. Returns the folder added, or None (cancelled).
+#[tauri::command(async)]
+fn add_folder(app: AppHandle, ui: State<Ui>) -> Result<Option<String>, String> {
+    let Some(picked) = app.dialog().file().set_title("Choose a World of Warcraft folder").blocking_pick_folder() else { return Ok(None) };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let root = wow::root_of(&path)
+        .ok_or_else(|| format!("No game in {}. Choose the World of Warcraft folder (the one with _retail_, _classic_ or _forever_ in it).", path.display()))?;
+    let mut c = ui.shared.cfg.lock().unwrap();
+    if !c.extra_roots.contains(&root) {
+        c.extra_roots.push(root.clone());
+    }
+    if c.wow_dir.as_ref().is_none_or(|d| !d.is_dir()) {
+        c.wow_dir = wow::resolve(&root);
+    }
+    c.save();
+    drop(c);
+    ui.send(Cmd::Wake);
+    Ok(Some(root.display().to_string()))
+}
+
+#[tauri::command(async)]
+fn forget_folder(ui: State<Ui>, root: String) {
+    let mut c = ui.shared.cfg.lock().unwrap();
+    c.extra_roots.retain(|r| r.to_string_lossy() != root);
+    c.save();
+}
+
+#[tauri::command(async)]
+fn set_setting(app: AppHandle, ui: State<Ui>, name: String, value: serde_json::Value) -> Result<(), String> {
+    match name.as_str() {
+        "auto_update" => {
+            let mut c = ui.shared.cfg.lock().unwrap();
+            c.auto_update = value.as_bool().unwrap_or(true);
+            c.save();
+        }
+        "paused" => set_paused(&app, value.as_bool().unwrap_or(false)),
+        "autostart" => {
+            let al = app.autolaunch();
+            let _ = if value.as_bool().unwrap_or(false) { al.enable() } else { al.disable() };
+            let _ = ui.autostart.set_checked(al.is_enabled().unwrap_or(false));
+        }
+        "selected" => {
+            let mut c = ui.shared.cfg.lock().unwrap();
+            c.selected = value.as_str().map(str::to_string);
+            c.save();
+        }
+        _ => return Err(format!("unknown setting {name}")),
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn upload_now(ui: State<Ui>) {
+    ui.send(Cmd::UploadNow);
+}
+
+#[tauri::command(async)]
+fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err("only https links open".into());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn open_addons_folder(app: AppHandle, ui: State<Ui>, install: String) -> Result<(), String> {
+    let i = find_install(&ui, &install)?;
+    let dir = if i.addons_dir.is_dir() { i.addons_dir } else { i.dir };
+    app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Background
+
+/// Refresh the catalog now and then every hour; when automatic updates are on, update what we installed.
+fn spawn_hourly(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut wait = Duration::from_secs(5);
+        let mut first = true;
+        loop {
+            std::thread::sleep(wait);
+            wait = HOURLY;
+            let ui = app.state::<Ui>();
+            // the window may have just loaded it
+            if !(first && ui.catalog().is_some()) {
+                refresh_catalog(&ui);
+                let _ = app.emit("catalog", ());
+            }
+            first = false;
+            if !ui.shared.cfg.lock().unwrap().auto_update {
+                continue;
+            }
+            let Some(cat) = ui.catalog() else { continue };
+            let mut out = Updated { changes: Vec::new(), failed: Vec::new() };
+            for i in installs(&ui) {
+                let (c, f) = manager::update_all(&i, &cat);
+                out.changes.extend(c);
+                out.failed.extend(f);
+            }
+            for f in &out.failed {
+                config::log(&format!("auto-update failed: {f}"));
+            }
+            if !out.changes.is_empty() || !out.failed.is_empty() {
+                let _ = app.emit("updated", out);
+            }
+        }
+    });
+}
+
+/// Check for a new version of the app a minute after start and then every hour; install it silently and restart.
 fn spawn_updater(app: AppHandle) {
     if cfg!(debug_assertions) {
         return;
@@ -327,7 +710,7 @@ fn spawn_updater(app: AppHandle) {
         let mut wait = Duration::from_secs(60);
         loop {
             std::thread::sleep(wait);
-            wait = Duration::from_secs(3600);
+            wait = HOURLY;
             let result = tauri::async_runtime::block_on(async {
                 let Some(update) = app.updater()?.check().await? else { return Ok(false) };
                 config::log(&format!("updating to {}", update.version));
