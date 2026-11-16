@@ -1,13 +1,5 @@
 /* EverlookDB app. Dark navy like everlookdb.com; gold only where something wants the player's attention. */
 
-@font-face {
-  font-family: 'Marcellus';
-  src: url('fonts/marcellus-latin.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
 :root {
   color-scheme: dark;
   --night: #0c1422;
@@ -27,7 +19,7 @@
   --warn: #ffb27a;
   --bad: #ff8f86;
 
-  --display: 'Marcellus', 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+  --display: 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif;
   --ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
 
   --r-s: 6px;
@@ -91,6 +83,7 @@ button { cursor: pointer; }
 .mark { width: 26px; height: 26px; flex: none; }
 .wordmark {
   font-family: var(--display);
+  font-weight: 600;
   font-size: 19px;
   letter-spacing: 0.01em;
 }
@@ -254,7 +247,7 @@ button { cursor: pointer; }
 .hero-name {
   margin: 0;
   font-family: var(--display);
-  font-weight: 400;
+  font-weight: 600;
   font-size: 40px;
   line-height: 1.05;
   letter-spacing: 0.005em;
@@ -279,6 +272,7 @@ button { cursor: pointer; }
 .hero-version .num {
   display: block;
   font-family: var(--display);
+  font-weight: 600;
   font-size: 40px;
   line-height: 1;
   color: var(--gold);
@@ -531,7 +525,7 @@ button { cursor: pointer; }
   max-width: 52ch;
   color: var(--ink-2);
 }
-.empty h3 { margin: 0 0 6px; font-family: var(--display); font-weight: 400; font-size: 22px; color: var(--ink); }
+.empty h3 { margin: 0 0 6px; font-family: var(--display); font-weight: 600; font-size: 22px; color: var(--ink); }
 .empty p { margin: 0 0 14px; }
 
 .other-toggle { margin: 14px 0 0; }

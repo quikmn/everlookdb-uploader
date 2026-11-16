@@ -101,8 +101,7 @@ Layout: `src-tauri/src/wow.rs` finds the games and versions, `addons.rs` reads `
 `worker.rs` watches and uploads, `config.rs` keeps settings, `main.rs` is the tray, the window and the commands the
 window calls. `ui/` is the window: plain HTML, CSS and JavaScript, no build step. Icons are generated from
 `assets/app-icon.svg` with `cargo tauri icon assets/app-icon.svg -o src-tauri/icons`; the macOS menu bar icon is
-`assets/tray-template.svg` rendered to `src-tauri/icons/tray-template.png`. The heading font is Marcellus (SIL Open
-Font License, `ui/fonts`).
+`assets/tray-template.svg` rendered to `src-tauri/icons/tray-template.png`. Fonts are the system's own (Segoe UI on Windows, San Francisco on macOS).
 
 ## Releasing
 
