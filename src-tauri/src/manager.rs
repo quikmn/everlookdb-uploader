@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Largest zip we download, and the most an archive may unpack to.
 const MAX_DOWNLOAD: u64 = 400 * 1024 * 1024;
@@ -24,6 +24,32 @@ const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
 
 /// One write at a time, across every install.
 static LOCK: Mutex<()> = Mutex::new(());
+
+/// How often a download reports its progress (about ten times a second).
+pub const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+
+/// Lets progress through at most once per `every`; the first report and the last always go through.
+pub struct Throttle {
+    every: Duration,
+    last: Option<Instant>,
+}
+
+impl Throttle {
+    pub fn new(every: Duration) -> Throttle {
+        Throttle { every, last: None }
+    }
+
+    pub fn ready(&mut self, now: Instant, last_report: bool) -> bool {
+        let due = last_report || self.last.is_none_or(|t| now.saturating_duration_since(t) >= self.every);
+        if due {
+            self.last = Some(now);
+        }
+        due
+    }
+}
+
+/// Called with (bytes done, bytes in all; 0 when neither the server nor the catalog says).
+pub type OnProgress<'a> = &'a mut dyn FnMut(u64, u64);
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Prev {
@@ -174,8 +200,9 @@ fn stamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
-/// Download a release zip into `dest`. https only; size must match the catalog when it gives one.
-pub fn download(url: &str, expect: u64, dest: &Path) -> Result<(), String> {
+/// Download a release zip into `dest`. https only; size must match the catalog when it gives one. Reports its
+/// progress to `progress`, throttled to PROGRESS_EVERY; the last report has done == total.
+pub fn download(url: &str, expect: u64, dest: &Path, progress: OnProgress) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err("refusing a download that isn't https".into());
     }
@@ -191,12 +218,17 @@ pub fn download(url: &str, expect: u64, dest: &Path) -> Result<(), String> {
     if resp.content_length().is_some_and(|n| n > MAX_DOWNLOAD) {
         return Err("the download is too large".into());
     }
+    let size = resp.content_length().filter(|n| *n > 0).unwrap_or(expect);
+    let mut throttle = Throttle::new(PROGRESS_EVERY);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; 64 * 1024];
     let mut total: u64 = 0;
+    if throttle.ready(Instant::now(), false) {
+        progress(0, size);
+    }
     loop {
         let n = resp.read(&mut buf).map_err(|e| format!("download failed: {e}"))?;
         if n == 0 {
@@ -209,6 +241,9 @@ pub fn download(url: &str, expect: u64, dest: &Path) -> Result<(), String> {
             return Err("the download is too large".into());
         }
         out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        if throttle.ready(Instant::now(), false) {
+            progress(total, size.max(total));
+        }
     }
     out.flush().map_err(|e| e.to_string())?;
     if expect > 0 && total != expect {
@@ -216,6 +251,8 @@ pub fn download(url: &str, expect: u64, dest: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(dest);
         return Err(format!("the download is {total} bytes, the catalog says {expect}; not installed"));
     }
+    throttle.ready(Instant::now(), true);
+    progress(total, total);
     Ok(())
 }
 
@@ -390,7 +427,7 @@ fn zip_dir(install: &Install, id: &str) -> PathBuf {
 
 /// Install or update `addon` in `install`. `take_over`: folders of this addon another app installed may be replaced
 /// (they are copied to the backups folder first).
-pub fn install(install: &Install, addon: &Addon, take_over: &[String]) -> Result<Change, String> {
+pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress: OnProgress) -> Result<Change, String> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let file = addon.file_for(&install.accepts).ok_or_else(|| format!("{} has no download for {}", addon.name, install.name))?;
     let mut records = Records::load();
@@ -399,7 +436,7 @@ pub fn install(install: &Install, addon: &Addon, take_over: &[String]) -> Result
     let name = if file.name.is_empty() { format!("{}.zip", short_hash(&file.url)) } else { file.name.replace(['/', '\\', ':'], "_") };
     let zip = dir.join(&name);
     let tmp = dir.join(format!("{name}.part"));
-    download(&file.url, file.size, &tmp)?;
+    download(&file.url, file.size, &tmp, progress)?;
     std::fs::rename(&tmp, &zip).map_err(|e| e.to_string())?;
 
     let mut allowed: HashSet<String> = old.as_ref().map(|r| r.folders.iter().cloned().collect()).unwrap_or_default();
@@ -504,19 +541,24 @@ pub fn remove(install: &Install, id: &str) -> Result<String, String> {
     Ok(rec.name)
 }
 
-/// Update every addon we installed that has a newer version in the catalog.
-pub fn update_all(install: &Install, catalog: &Catalog) -> (Vec<Change>, Vec<String>) {
+/// The addons we installed in `install` that have a newer version in the catalog.
+pub fn pending<'a>(install: &Install, catalog: &'a Catalog) -> Vec<&'a Addon> {
     let records = Records::load().of(&install.id);
+    records
+        .iter()
+        .filter_map(|(id, rec)| catalog.get(id).filter(|a| a.file_for(&install.accepts).is_some() && differs(Some(&rec.version), &a.version)))
+        .collect()
+}
+
+/// Update every addon we installed that has a newer version in the catalog. `progress` gets the addon's id with
+/// each download report.
+pub fn update_all(install: &Install, catalog: &Catalog, progress: &mut dyn FnMut(&str, u64, u64)) -> (Vec<Change>, Vec<String>) {
     let mut done = Vec::new();
     let mut failed = Vec::new();
-    for (id, rec) in records {
-        let Some(addon) = catalog.get(&id) else { continue };
-        if addon.file_for(&install.accepts).is_none() || !differs(Some(&rec.version), &addon.version) {
-            continue;
-        }
-        match self::install(install, addon, &[]) {
+    for addon in pending(install, catalog) {
+        match self::install(install, addon, &[], &mut |d, t| progress(&addon.id, d, t)) {
             Ok(c) => done.push(c),
-            Err(e) => failed.push(format!("{}: {e}", rec.name)),
+            Err(e) => failed.push(format!("{}: {e}", addon.name)),
         }
     }
     (done, failed)
@@ -627,6 +669,32 @@ mod tests {
     }
 
     #[test]
+    fn progress_is_throttled() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut t = Throttle::new(PROGRESS_EVERY);
+        // the first report always goes through
+        assert!(t.ready(ms(0), false));
+        // then at most one per 100 ms
+        assert!(!t.ready(ms(1), false));
+        assert!(!t.ready(ms(99), false));
+        assert!(t.ready(ms(100), false));
+        assert!(!t.ready(ms(150), false));
+        // the last one always goes through, and restarts the wait
+        assert!(t.ready(ms(151), true));
+        assert!(!t.ready(ms(200), false));
+        assert!(t.ready(ms(251), false));
+        // a steady stream of reads every 5 ms for 2 s gives about 10 a second
+        let mut t = Throttle::new(PROGRESS_EVERY);
+        let sent = (0..400).filter(|i| t.ready(ms(i * 5), false)).count();
+        assert_eq!(sent, 20);
+        // a clock that goes backwards (it can't with Instant, but saturating anyway) doesn't let a flood through
+        let mut t = Throttle::new(PROGRESS_EVERY);
+        assert!(t.ready(ms(500), false));
+        assert!(!t.ready(ms(400), false));
+    }
+
+    #[test]
     fn records_flow_with_local_files() {
         // the full install()/rollback()/remove() path needs a download; check the pieces around it instead
         let a = Addon {
@@ -637,7 +705,7 @@ mod tests {
             ..Default::default()
         };
         assert!(a.file_for(&["forever".into()]).is_some());
-        assert!(download("http://insecure", 0, &std::env::temp_dir().join("x.zip")).is_err());
+        assert!(download("http://insecure", 0, &std::env::temp_dir().join("x.zip"), &mut |_, _| {}).is_err());
         assert!(differs(Some("v1.0"), "1.1"));
         assert!(!differs(Some("v1.0"), "1.0"));
         assert!(!differs(None, "1.0"));
@@ -673,13 +741,18 @@ mod tests {
         let pre = install.addons_dir.join("EverlookDB");
         std::fs::create_dir_all(&pre).unwrap();
         std::fs::write(pre.join("EverlookDB.toc"), "## Version: old").unwrap();
-        assert!(super::install(&install, &v1, &[]).is_err());
-        let c = super::install(&install, &v1, &["EverlookDB".to_string()]).unwrap();
+        assert!(super::install(&install, &v1, &[], &mut |_, _| {}).is_err());
+        let mut reports = Vec::new();
+        let c = super::install(&install, &v1, &["EverlookDB".to_string()], &mut |d, t| reports.push((d, t))).unwrap();
+        // starts at 0 of the size, ends at size of size, never goes back
+        assert_eq!(reports.first(), Some(&(0, 69995)));
+        assert_eq!(reports.last(), Some(&(69995, 69995)));
+        assert!(reports.windows(2).all(|w| w[0].0 <= w[1].0));
         assert_eq!(c.to, "v0.1.3");
         assert!(std::fs::read_to_string(pre.join("EverlookDB.toc")).unwrap().contains("v0.1.3"));
         assert!(std::fs::read_dir(config::dir().join("backups")).unwrap().count() == 1);
 
-        let c = super::install(&install, &v2, &[]).unwrap();
+        let c = super::install(&install, &v2, &[], &mut |_, _| {}).unwrap();
         assert_eq!((c.from.as_deref(), c.to.as_str()), (Some("v0.1.3"), "v0.1.4"));
         let item = list(&install, None).into_iter().find(|i| i.key == "github:quikmn/EverlookDB").unwrap();
         assert!(item.managed);
@@ -687,12 +760,19 @@ mod tests {
 
         let c = rollback(&install, "github:quikmn/EverlookDB").unwrap();
         assert_eq!(c.to, "v0.1.3");
-        let (changes, failed) = update_all(&install, &Catalog { version: 1, addons: vec![v2.clone()], ..Default::default() });
+        let cat = Catalog { version: 1, addons: vec![v2.clone()], ..Default::default() };
+        assert_eq!(pending(&install, &cat).len(), 1);
+        let mut ids = HashSet::new();
+        let (changes, failed) = update_all(&install, &cat, &mut |id, _, _| {
+            ids.insert(id.to_string());
+        });
         assert_eq!((changes.len(), failed.len()), (1, 0));
+        assert_eq!(ids, HashSet::from(["github:quikmn/EverlookDB".to_string()]));
+        assert!(pending(&install, &cat).is_empty());
 
         // size check
         let bad = Addon { files: vec![file("EverlookDB.zip", 12)], version: "v9".into(), ..v1.clone() };
-        assert!(super::install(&install, &bad, &[]).unwrap_err().contains("bytes"));
+        assert!(super::install(&install, &bad, &[], &mut |_, _| {}).unwrap_err().contains("bytes"));
 
         assert_eq!(remove(&install, "github:quikmn/EverlookDB").unwrap(), "EverlookDB Collector");
         assert!(!pre.exists());

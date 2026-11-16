@@ -499,13 +499,25 @@ button { cursor: pointer; }
 .btn.solid:hover { background: #ffdc3d; }
 .btn.danger { color: var(--bad); }
 .btn[disabled] { cursor: default; opacity: 0.65; }
-.btn[aria-busy='true'] { position: relative; color: transparent; min-width: 108px; }
+.btn[aria-busy='true'] { position: relative; color: transparent; min-width: 124px; opacity: 1; }
+.btn.solid[aria-busy='true'] { background: transparent; border-color: rgba(255, 209, 0, 0.55); }
 .btn[aria-busy='true']::after {
   content: attr(data-busy);
   position: absolute; inset: 0;
   display: grid; place-items: center;
   color: var(--ink-2);
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+/* download progress: a slim bar along the bottom of the busy button */
+.btn[aria-busy='true'][data-progress]::after { inset: 0 0 3px; }
+.btn[aria-busy='true'][data-progress]::before {
+  content: '';
+  position: absolute; left: 8px; right: 8px; bottom: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--gold) var(--p, 0%), rgba(255, 255, 255, 0.1) var(--p, 0%));
+  transition: background 0.1s linear;
 }
 
 .row-more {

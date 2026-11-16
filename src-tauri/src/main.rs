@@ -553,6 +553,18 @@ fn refresh_catalog(ui: &Ui) {
     c.checked = Some(chrono::Local::now().format("%H:%M").to_string());
 }
 
+/// A download's progress, for the window ("progress" event): addon `id` in `install`, `done` of `total` bytes
+/// (total 0: unknown), the `index`th (from 1) of `count` addons in this run.
+#[derive(Serialize, Clone)]
+struct Progress<'a> {
+    install: &'a str,
+    id: &'a str,
+    done: u64,
+    total: u64,
+    index: usize,
+    count: usize,
+}
+
 #[tauri::command]
 async fn install_addon(app: AppHandle, install: String, id: String, take_over: Vec<String>) -> Result<manager::Change, String> {
     blocking(app, move |app| {
@@ -560,7 +572,9 @@ async fn install_addon(app: AppHandle, install: String, id: String, take_over: V
         let i = find_install(&ui, &install)?;
         let cat = ui.catalog().ok_or("The addon list hasn't loaded yet.")?;
         let addon = cat.get(&id).ok_or("That addon isn't in the list any more.")?;
-        manager::install(&i, addon, &take_over)
+        manager::install(&i, addon, &take_over, &mut |done, total| {
+            let _ = app.emit("progress", Progress { install: &i.id, id: &addon.id, done, total, index: 1, count: 1 });
+        })
     })
     .await
 }
@@ -583,6 +597,26 @@ struct Updated {
     failed: Vec<String>,
 }
 
+/// Update everything we installed in `targets`, telling the window how far each download is and which of how many.
+fn update_installs(app: &AppHandle, targets: &[wow::Install], cat: &catalog::Catalog) -> Updated {
+    let count: usize = targets.iter().map(|i| manager::pending(i, cat).len()).sum();
+    let mut out = Updated { changes: Vec::new(), failed: Vec::new() };
+    let mut index = 0;
+    let mut current = String::new();
+    for i in targets {
+        let (c, f) = manager::update_all(i, cat, &mut |id, done, total| {
+            if id != current {
+                current = id.to_string();
+                index += 1;
+            }
+            let _ = app.emit("progress", Progress { install: &i.id, id, done, total, index, count: count.max(index) });
+        });
+        out.changes.extend(c);
+        out.failed.extend(f);
+    }
+    out
+}
+
 /// Update everything we installed, in one install or (None) every install.
 #[tauri::command]
 async fn update_all(app: AppHandle, install: Option<String>) -> Result<Updated, String> {
@@ -593,13 +627,7 @@ async fn update_all(app: AppHandle, install: Option<String>) -> Result<Updated, 
             Some(id) => vec![find_install(&ui, &id)?],
             None => installs(&ui),
         };
-        let mut out = Updated { changes: Vec::new(), failed: Vec::new() };
-        for i in targets {
-            let (c, f) = manager::update_all(&i, &cat);
-            out.changes.extend(c);
-            out.failed.extend(f);
-        }
-        Ok(out)
+        Ok(update_installs(app, &targets, &cat))
     })
     .await
 }
@@ -697,12 +725,7 @@ fn spawn_hourly(app: AppHandle) {
                 continue;
             }
             let Some(cat) = ui.catalog() else { continue };
-            let mut out = Updated { changes: Vec::new(), failed: Vec::new() };
-            for i in installs(&ui) {
-                let (c, f) = manager::update_all(&i, &cat);
-                out.changes.extend(c);
-                out.failed.extend(f);
-            }
+            let out = update_installs(&app, &installs(&ui), &cat);
             for f in &out.failed {
                 config::log(&format!("auto-update failed: {f}"));
             }

@@ -20,6 +20,7 @@ const S = {
   q: '',
   open: new Set(),
   busy: new Map(),
+  progress: new Map(),
   confirm: null,
   showOther: false,
   catIndex: new Map(),
@@ -144,6 +145,7 @@ function renderList() {
     return;
   }
   list.innerHTML = S.tab === 'mine' ? mineHtml(i) : browseHtml(i);
+  paintProgress();
 }
 
 function mineHtml(i) {
@@ -170,7 +172,7 @@ function mineHtml(i) {
   const bar =
     updates.length && !q
       ? `<div class="updates-bar"><p>${plural(updates.length, 'update', 'updates')} ready</p>
-         <button class="btn solid" type="button" data-act="update-all" ${S.busy.has('*') ? 'disabled aria-busy="true" data-busy="Updating…"' : ''}>Update all</button></div>`
+         <button class="btn solid" type="button" data-act="update-all" ${busyAttrs('*')}>Update all</button></div>`
       : '';
   return bar + `<ul class="rows">${items.map((it) => mineRow(it, i)).join('')}</ul>`;
 }
@@ -192,8 +194,47 @@ function oursMark(on) {
 
 const CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
 
-function busyAttrs(key, label) {
-  return S.busy.has(key) ? `disabled aria-busy="true" data-busy="${esc(S.busy.get(key))}"` : '';
+// the addon "Update all" is downloading right now, if it is
+const updatingNow = () => (S.busy.has('*') && S.progress.get('*')?.id) || null;
+
+function busyLabel(key) {
+  return S.busy.get(key) ?? (key === updatingNow() ? 'Updating…' : null);
+}
+
+function busyAttrs(key) {
+  const label = busyLabel(key);
+  return label ? `disabled aria-busy="true" data-pkey="${esc(key)}" data-busy="${esc(label)}"` : '';
+}
+
+const mb = (n) => `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB`;
+
+// what a busy button says, and how full its bar is (null: no bar), from the last "progress" event for it
+function progressOf(key) {
+  const label = busyLabel(key);
+  const p = S.progress.get(key);
+  if (!label || !p) return { text: label, frac: null };
+  if (key === '*' && p.count > 1) {
+    // the bar covers the whole run: addons done, plus how far the current one is
+    return { text: `Updating ${p.index} of ${p.count}`, frac: (p.index - 1 + (p.total ? Math.min(1, p.done / p.total) : 0)) / p.count };
+  }
+  if (p.total && p.done >= p.total) return { text: 'Unpacking…', frac: 1 };
+  const verb = label.replace('…', '');
+  if (!p.total) return { text: `${verb} ${mb(p.done)}`, frac: null };
+  return { text: `${verb} ${Math.floor((p.done * 100) / p.total)}%`, frac: p.done / p.total };
+}
+
+// update the busy buttons in place (progress comes about ten times a second; no need to redraw the list)
+function paintProgress() {
+  for (const b of document.querySelectorAll('.btn[data-pkey]')) {
+    const { text, frac } = progressOf(b.dataset.pkey);
+    if (text) b.dataset.busy = text;
+    if (frac === null) {
+      delete b.dataset.progress;
+    } else {
+      b.dataset.progress = '';
+      b.style.setProperty('--p', `${(Math.min(1, frac) * 100).toFixed(1)}%`);
+    }
+  }
 }
 
 function mineRow(it, i) {
@@ -368,6 +409,8 @@ async function run(key, label, fn) {
     showError(String(e));
   } finally {
     S.busy.delete(key);
+    S.progress.delete(key);
+    if (key === '*') S.progress.clear();
     await loadItems();
   }
 }
@@ -528,6 +571,16 @@ $('upload-now').addEventListener('click', () => {
   $('upload-text').textContent = 'Uploading…';
 });
 
+listen('progress', (e) => {
+  const p = e.payload;
+  if (p.install !== S.sel) return;
+  const before = updatingNow();
+  S.progress.set(p.id, p);
+  if (S.busy.has('*')) S.progress.set('*', p);
+  // "Update all" moved on to the next addon: its row's button turns busy, the last one's back
+  if (updatingNow() !== before) renderList();
+  else paintProgress();
+});
 listen('uploads', (e) => renderUploads(e.payload));
 listen('catalog', () => loadCatalog(false));
 listen('settings', () => loadState());
