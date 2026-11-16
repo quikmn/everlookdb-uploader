@@ -127,9 +127,10 @@ pub struct Change {
     pub to: String,
 }
 
-/// "v12.9.0+v1.1.1" -> "12.9.0": no leading v, no build metadata after '+'.
+/// "bundle/v12.9.0+v1.1.1" -> "12.9.0": no tag prefix before '/', no leading v, no build metadata after '+'.
 fn norm(v: &str) -> String {
-    let v = v.trim().trim_start_matches(['v', 'V']);
+    let v = v.trim();
+    let v = v.rsplit('/').next().unwrap_or(v).trim_start_matches(['v', 'V']);
     v.split('+').next().unwrap_or(v).trim().to_ascii_lowercase()
 }
 
@@ -585,6 +586,14 @@ mod tests {
             z.write_all(body.as_bytes()).unwrap();
         }
         z.finish().unwrap();
+    }
+
+    #[test]
+    fn reads_release_tags() {
+        assert!(!differs(Some("12.9.0"), "bundle/v12.9.0+v1.1.1"));
+        assert!(differs(Some("12.8.0"), "bundle/v12.9.0+v1.1.1"));
+        assert!(!differs(Some("12.9.0"), "v12.8.0"));
+        assert!(!differs(Some("v427.9"), "427.9"));
     }
 
     #[test]

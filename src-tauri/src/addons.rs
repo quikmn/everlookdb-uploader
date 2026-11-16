@@ -177,13 +177,17 @@ pub struct Group {
     pub key: Option<String>,
 }
 
-/// The folder the others lean on: most dependents, then the shortest name.
+/// The addon's own folder, whose version and title stand for the group: the one whose name starts all the others
+/// (`Questie` for `QuestieDB` and `QuestieTrace`, though Questie leans on QuestieDB), else the one the others lean
+/// on most, then the shortest name.
 fn pick_main(folders: &[String], by_name: &BTreeMap<String, &Folder>) -> String {
     folders
         .iter()
         .max_by_key(|f| {
+            let lower = f.to_ascii_lowercase();
+            let prefix = folders.iter().all(|o| o.to_ascii_lowercase().starts_with(&lower));
             let dependents = folders.iter().filter(|o| by_name.get(*o).is_some_and(|x| x.toc.deps.iter().any(|d| d.eq_ignore_ascii_case(f)))).count();
-            (dependents, std::cmp::Reverse(f.len()))
+            (prefix, dependents, std::cmp::Reverse(f.len()))
         })
         .cloned()
         .unwrap_or_default()
@@ -275,8 +279,14 @@ mod tests {
             folder("ForeverAurasTemplates", &["ForeverAuras", "ForeverAurasOptions"]),
             folder("DBM-Core", &[]),
             folder("DBM-GUI", &["DBM-Core"]),
+            folder("Questie", &["QuestieDB"]),
+            folder("QuestieDB", &[]),
+            folder("QuestieTrace", &[]),
         ];
-        let known = vec![("github:DeadlyBossMods/DeadlyBossMods".to_string(), vec!["DBM-Brawlers".to_string(), "DBM-Core".into(), "DBM-GUI".into()])];
+        let known = vec![
+            ("github:DeadlyBossMods/DeadlyBossMods".to_string(), vec!["DBM-Brawlers".to_string(), "DBM-Core".into(), "DBM-GUI".into()]),
+            ("github:Questie/Questie".to_string(), vec!["Questie".to_string(), "QuestieDB".into(), "QuestieTrace".into()]),
+        ];
         let g = group(&folders, &known);
         let find = |m: &str| g.iter().find(|x| x.main == m).unwrap_or_else(|| panic!("no group {m}: {g:?}"));
         assert_eq!(find("DBM-Core").folders.len(), 2);
@@ -287,7 +297,9 @@ mod tests {
         // separate addons that merely share a prefix stay separate
         assert_eq!(find("EverlookDB").folders, vec!["EverlookDB"]);
         assert_eq!(find("EverlookDBAuctions").folders, vec!["EverlookDBAuctions"]);
-        assert_eq!(g.len(), 6);
+        // Questie leans on QuestieDB, but Questie is the addon: its version stands for the group
+        assert_eq!(find("Questie").folders.len(), 3);
+        assert_eq!(g.len(), 7);
     }
 
     #[test]
