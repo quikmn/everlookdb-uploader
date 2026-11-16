@@ -68,7 +68,7 @@ if (-not $LatestOnly) {
 
   if (-not $NoUpload) {
     gh release view $Tag -R $Repo *> $null
-    if ($LASTEXITCODE -ne 0) { gh release create $Tag -R $Repo --draft --title "EverlookDB Uploader $Version" --notes "EverlookDB Uploader $Version" }
+    if ($LASTEXITCODE -ne 0) { gh release create $Tag -R $Repo --draft --title "EverlookDB $Version" --notes "EverlookDB $Version" }
     # fixed name too: everlookdb.com links to releases/latest/download/EverlookDB-Uploader-windows.exe
     Copy-Item (Join-Path $Dist $WinAsset) (Join-Path $Dist 'EverlookDB-Uploader-windows.exe') -Force
     gh release upload $Tag -R $Repo (Join-Path $Dist $WinAsset) (Join-Path $Dist "$WinAsset.sig") (Join-Path $Dist 'EverlookDB-Uploader-windows.exe') --clobber
@@ -94,7 +94,7 @@ if (Test-Path $macSig) {
 }
 $latest = [ordered]@{
   version   = $Version
-  notes     = "EverlookDB Uploader $Version"
+  notes     = "EverlookDB $Version"
   pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
   platforms = $platforms
 }

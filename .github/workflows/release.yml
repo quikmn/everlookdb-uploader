@@ -89,7 +89,7 @@ jobs:
       - name: Check the signature
         if: env.MAC_SIGNED == '1'
         run: |
-          app="src-tauri/target/universal-apple-darwin/release/bundle/macos/EverlookDB Uploader.app"
+          app="src-tauri/target/universal-apple-darwin/release/bundle/macos/EverlookDB.app"
           codesign --verify --deep --strict "$app"
           codesign -dv --verbose=2 "$app" 2>&1 | grep -E '^(Authority=Developer ID Application|TeamIdentifier)'
           spctl --assess --type execute -vv "$app"
@@ -102,9 +102,9 @@ jobs:
           cp "$b/dmg/"*.dmg "dist/EverlookDB-Uploader_${v}_universal.dmg"
           # fixed name too: everlookdb.com links to releases/latest/download/EverlookDB-Uploader-mac.dmg
           cp "$b/dmg/"*.dmg "dist/EverlookDB-Uploader-mac.dmg"
-          if [ -f "$b/macos/EverlookDB Uploader.app.tar.gz.sig" ]; then
-            cp "$b/macos/EverlookDB Uploader.app.tar.gz" "dist/EverlookDB-Uploader_${v}_universal.app.tar.gz"
-            cp "$b/macos/EverlookDB Uploader.app.tar.gz.sig" "dist/EverlookDB-Uploader_${v}_universal.app.tar.gz.sig"
+          if [ -f "$b/macos/EverlookDB.app.tar.gz.sig" ]; then
+            cp "$b/macos/EverlookDB.app.tar.gz" "dist/EverlookDB-Uploader_${v}_universal.app.tar.gz"
+            cp "$b/macos/EverlookDB.app.tar.gz.sig" "dist/EverlookDB-Uploader_${v}_universal.app.tar.gz.sig"
           fi
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "EverlookDB Uploader $v" --notes "EverlookDB Uploader $v"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "EverlookDB $v" --notes "EverlookDB $v"
           gh release upload "$TAG" dist/* --clobber
