@@ -27,7 +27,7 @@ pub struct Done {
     pub ok: bool,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     /// the `World of Warcraft/_forever_` folder
     #[serde(default)]
@@ -40,15 +40,30 @@ pub struct Config {
     /// the tray's line about the last upload, kept across restarts
     #[serde(default)]
     pub last_status: Option<String>,
+    /// `World of Warcraft` folders the player added by hand
+    #[serde(default)]
+    pub extra_roots: Vec<PathBuf>,
+    /// update the addons we installed about once an hour
+    #[serde(default = "yes")]
+    pub auto_update: bool,
+    /// the install the window shows (its flavor folder)
+    #[serde(default)]
+    pub selected: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, extra_roots: Vec::new(), auto_update: true, selected: None }
+    }
 }
 
 impl Config {
     fn path() -> PathBuf {
         dir().join("config.json")
-    }
-
-    pub fn exists() -> bool {
-        Self::path().is_file()
     }
 
     pub fn load() -> Config {

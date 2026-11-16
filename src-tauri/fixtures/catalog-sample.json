@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "updated": "2026-11-16T15:00:00Z",
+  "addons": [
+    {
+      "id": "github:BigWigsMods/BigWigs",
+      "name": "BigWigs Bossmods",
+      "author": "BigWigsMods",
+      "summary": "Modular and lightweight approach to providing you with the tools you need to beat any boss encounter.",
+      "source": "github",
+      "url": "https://github.com/BigWigsMods/BigWigs",
+      "version": "v427.9",
+      "released": "2026-11-08T20:38:50Z",
+      "files": [
+        { "flavors": ["retail", "classic", "classic_era", "anniversary", "forever"], "interfaces": [120105, 120107, 50504, 40402, 11509, 20506, 16001],
+          "url": "https://github.com/BigWigsMods/BigWigs/releases/download/v427.9/BigWigs-v427.9.zip", "name": "BigWigs-v427.9.zip", "size": 4637291 }
+      ],
+      "folders": ["BigWigs", "BigWigs_Core", "BigWigs_MarchOnQuelDanas", "BigWigs_MidnightLairs", "BigWigs_MidnightWorld", "BigWigs_Options", "BigWigs_Plugins", "BigWigs_Sporefall", "BigWigs_TheDreamrift", "BigWigs_TheUnbindingOfKithix", "BigWigs_TheVenomousAbyss", "BigWigs_TheVoidspire"],
+      "ours": false
+    },
+    {
+      "id": "github:DeadlyBossMods/DeadlyBossMods",
+      "name": "Deadly Boss Mods",
+      "author": "DeadlyBossMods",
+      "summary": "The ultimate encounter helper to give you fight info that's easy to process at a glance.",
+      "source": "github",
+      "url": "https://github.com/DeadlyBossMods/DeadlyBossMods",
+      "version": "12.1.23",
+      "released": "2026-11-13T06:44:43Z",
+      "files": [
+        { "flavors": ["retail", "classic", "classic_era", "anniversary", "forever"], "interfaces": [120105, 120107, 50504, 40402, 11509, 20506, 16001],
+          "url": "https://github.com/DeadlyBossMods/DeadlyBossMods/releases/download/12.1.23/DBM-Core-12.1.23.zip", "name": "DBM-Core-12.1.23.zip", "size": 12781102 }
+      ],
+      "folders": ["DBM-Brawlers", "DBM-Core", "DBM-GUI", "DBM-Lairs-Midnight", "DBM-Midnight", "DBM-Raids-Midnight", "DBM-StatusBarTimers", "DBM-VPVEM"],
+      "ours": false
+    },
+    {
+      "id": "github:WeakAuras/WeakAuras2",
+      "name": "WeakAuras",
+      "author": "WeakAuras",
+      "summary": "A powerful framework to display customizable graphics on your screen.",
+      "source": "github",
+      "url": "https://github.com/WeakAuras/WeakAuras2",
+      "version": "5.22.1",
+      "released": "2026-10-10T17:21:31Z",
+      "files": [
+        { "flavors": ["classic", "classic_era", "anniversary"], "interfaces": [50504, 40402, 11509, 20506],
+          "url": "https://github.com/WeakAuras/WeakAuras2/releases/download/5.22.1/WeakAuras-5.22.1.zip", "name": "WeakAuras-5.22.1.zip", "size": 10557265 }
+      ],
+      "folders": ["WeakAuras", "WeakAurasArchive", "WeakAurasModelPaths", "WeakAurasOptions", "WeakAurasTemplates"],
+      "ours": false
+    },
+    {
+      "id": "tukui:elvui",
+      "name": "ElvUI",
+      "author": "Elv",
+      "summary": "A user interface designed around user-friendliness with extra features that are not included in the standard UI.",
+      "source": "tukui",
+      "url": "https://tukui.org/elvui",
+      "version": "16.01",
+      "released": "2026-11-03T00:00:00Z",
+      "files": [
+        { "flavors": ["retail", "forever", "classic", "classic_era", "anniversary"], "interfaces": [],
+          "url": "https://api.tukui.org/v1/download/elvui/LLSQGr0PoEokgCREYuu2kmf7Ae9a6NsgAosn-NMC1v1RL_YJDA", "name": "elvui-16.01.zip", "size": 3160469 }
+      ],
+      "folders": ["ElvUI", "ElvUI_Libraries", "ElvUI_Options"],
+      "ours": false
+    },
+    {
+      "id": "github:Nevcairiel/Bartender4",
+      "name": "Bartender4",
+      "author": "Nevcairiel",
+      "summary": "Full action bar replacement: move, resize and style every bar.",
+      "source": "github",
+      "url": "https://github.com/Nevcairiel/Bartender4",
+      "version": "4.18.4.1",
+      "released": "2026-11-14T18:58:10Z",
+      "files": [
+        { "flavors": ["retail", "classic", "classic_era", "anniversary", "forever"], "interfaces": [120100, 120105, 50504, 11509, 20506, 16001],
+          "url": "https://github.com/Nevcairiel/Bartender4/releases/download/4.18.4.1/Bartender4-4.18.4.1.zip", "name": "Bartender4-4.18.4.1.zip", "size": 403653 }
+      ],
+      "folders": ["Bartender4"],
+      "ours": false
+    },
+    {
+      "id": "github:Questie/Questie",
+      "name": "Questie",
+      "author": "Questie",
+      "summary": "The quest helper: shows quest givers, objectives and turn-ins on your map.",
+      "source": "github",
+      "url": "https://github.com/Questie/Questie",
+      "version": "v12.9.0+v1.1.1",
+      "released": "2026-11-14T00:31:36Z",
+      "files": [
+        { "flavors": ["classic_era", "anniversary", "classic", "forever"], "interfaces": [11509, 20506, 50504, 16001],
+          "url": "https://github.com/Questie/Questie/releases/download/bundle/v12.9.0%2Bv1.1.1/Questie-v12.9.0%2Bv1.1.1.zip", "name": "Questie-v12.9.0+v1.1.1.zip", "size": 96309092 }
+      ],
+      "folders": ["Questie"],
+      "ours": false
+    },
+    {
+      "id": "github:Stanzilla/AdvancedInterfaceOptions",
+      "name": "Advanced Interface Options",
+      "author": "Stanzilla",
+      "summary": "Restores removed interface options and lets you change hidden console settings.",
+      "source": "github",
+      "url": "https://github.com/Stanzilla/AdvancedInterfaceOptions",
+      "version": "2.1.14",
+      "released": "2026-09-27T17:09:29Z",
+      "files": [
+        { "flavors": ["retail"], "interfaces": [],
+          "url": "https://github.com/Stanzilla/AdvancedInterfaceOptions/releases/download/2.1.14/AdvancedInterfaceOptions-2.1.14.zip", "name": "AdvancedInterfaceOptions-2.1.14.zip", "size": 144395 },
+        { "flavors": ["classic"], "interfaces": [],
+          "url": "https://github.com/Stanzilla/AdvancedInterfaceOptions/releases/download/2.1.14/AdvancedInterfaceOptions-2.1.14-cata.zip", "name": "AdvancedInterfaceOptions-2.1.14-cata.zip", "size": 144360 },
+        { "flavors": ["classic_era"], "interfaces": [],
+          "url": "https://github.com/Stanzilla/AdvancedInterfaceOptions/releases/download/2.1.14/AdvancedInterfaceOptions-2.1.14-classic.zip", "name": "AdvancedInterfaceOptions-2.1.14-classic.zip", "size": 144360 }
+      ],
+      "folders": ["AdvancedInterfaceOptions"],
+      "ours": false
+    },
+    {
+      "id": "github:quikmn/EverlookDB",
+      "name": "EverlookDB Collector",
+      "author": "quikmn",
+      "summary": "Notes loot, vendors, quests and where NPCs and nodes are while you play, for EverlookDB.com. Saves nothing about you.",
+      "source": "github",
+      "url": "https://github.com/quikmn/EverlookDB",
+      "version": "v0.1.3",
+      "released": "2026-11-14T15:08:43Z",
+      "files": [
+        { "flavors": ["forever"], "interfaces": [16001],
+          "url": "https://github.com/quikmn/EverlookDB/releases/download/v0.1.3/EverlookDB-v0.1.3-forever.zip", "name": "EverlookDB-v0.1.3-forever.zip", "size": 69995 }
+      ],
+      "folders": ["EverlookDB"],
+      "ours": true
+    },
+    {
+      "id": "github:quikmn/EverlookDBAuctions",
+      "name": "EverlookDB Auctions",
+      "author": "quikmn",
+      "summary": "Scans the auction house so everlookdb.com can show real prices.",
+      "source": "github",
+      "url": "https://github.com/quikmn/EverlookDBAuctions",
+      "version": "v0.6.0",
+      "released": "2026-11-14T22:36:55Z",
+      "files": [
+        { "flavors": ["forever"], "interfaces": [16001],
+          "url": "https://github.com/quikmn/EverlookDBAuctions/releases/download/v0.6.0/EverlookDBAuctions-v0.6.0-forever.zip", "name": "EverlookDBAuctions-v0.6.0-forever.zip", "size": 194602 }
+      ],
+      "folders": ["EverlookDBAuctions"],
+      "ours": true
+    }
+  ]
+}
