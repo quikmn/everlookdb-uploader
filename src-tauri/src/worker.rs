@@ -400,13 +400,16 @@ fn unix_now() -> i64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// "14:05" today, "16 Nov 14:05" on another day.
+/// "14:05" today, "16 Nov 14:05" on another day (with the year in another year).
 fn clock(t: i64) -> String {
     let Some(d) = chrono::DateTime::from_timestamp(t, 0).map(|d| d.with_timezone(&chrono::Local)) else { return String::new() };
-    if d.date_naive() == chrono::Local::now().date_naive() {
+    let today = chrono::Local::now().date_naive();
+    if d.date_naive() == today {
         d.format("%H:%M").to_string()
-    } else {
+    } else if d.format("%Y").to_string() == today.format("%Y").to_string() {
         d.format("%-d %b %H:%M").to_string()
+    } else {
+        d.format("%-d %b %Y %H:%M").to_string()
     }
 }
 
