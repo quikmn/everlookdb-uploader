@@ -52,11 +52,13 @@ The EverlookDB addon writes what it recorded to
 `World of Warcraft/_forever_/WTF/Account/<account>/SavedVariables/EverlookDB.lua` (and `EverlookDBAuctions.lua`,
 the EverlookDB Auctions addon's auction scans) when you log out or `/reload`. The app notices that, waits until the
 game has finished writing, and sends the file to `https://everlookdb.com/api/v1/upload`, the same as the upload box
-on the site. Each request body is one of those files, as it is on disk, and nothing else: no account or character
+on the site. Each request body is one of those files, as it is on disk (auction files gzip-compressed), and nothing else: no account or character
 names, no file paths (the path holds your account folder name, so it is never sent), no other files, no machine
 information. The server keeps only the checked game facts, not the file or your IP address; see
 [everlookdb.com/privacy.html](https://everlookdb.com/privacy.html). A file is sent only when its content changed since
-the last upload; several accounts are fine. The switch under Uploads (or **Pause uploads** in the tray menu) stops it.
+the last upload or when the last upload failed: a failed or refused upload is sent again (at once when the file
+changes, otherwise after 1, 5, 15 and 30 minutes, then hourly, and when the app starts), and the window shows
+each file's last answer, green, amber or red. Auction files go gzip-compressed. Several accounts are fine. The switch under Uploads (or **Pause uploads** in the tray menu) stops it.
 
 Its settings, the addon records, the cached catalog, kept zips and a small log stay on your computer, in
 `%APPDATA%\com.everlookdb.uploader` (Windows) or `~/Library/Application Support/com.everlookdb.uploader` (macOS).
