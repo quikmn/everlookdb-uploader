@@ -1006,6 +1006,7 @@ name = "everlookdb-uploader"
 version = "0.4.0"
 dependencies = [
  "chrono",
+ "flate2",
  "image",
  "reqwest",
  "rustls",

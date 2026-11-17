@@ -171,6 +171,12 @@ fn command_line(args: &Args) -> i32 {
     let shared = Arc::new(Shared { cfg: Mutex::new(cfg), server: args.server.clone() });
     let status = Watcher::new(shared).pass(false, true);
     println!("Result:      {}", status.line);
+    for v in &status.views {
+        println!("  {}: {}{}", v.label, v.headline, v.next.as_deref().map(|n| format!(" ({n})")).unwrap_or_default());
+        for d in &v.details {
+            println!("    {d}");
+        }
+    }
     if status.kind == Kind::Ok || status.kind == Kind::Idle { 0 } else { 2 }
 }
 
@@ -195,6 +201,8 @@ struct UploadState {
     accounts: usize,
     folder: Option<String>,
     paused: bool,
+    /// each watched file's last answer (no paths, no account names)
+    files: Vec<worker::FileView>,
 }
 
 #[derive(Default)]
@@ -351,11 +359,11 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
     std::thread::spawn(icons::prune);
 
     let handle = app.clone();
-    let mut last: Option<(String, usize, Option<PathBuf>)> = None;
+    let mut last: Option<(String, usize, Option<PathBuf>, Vec<worker::FileView>)> = None;
     std::thread::spawn(move || {
         Watcher::new(shared.clone()).run(rx, |s: &Status| {
             let dir = shared.cfg.lock().unwrap().wow_dir.clone();
-            let now = (s.line.clone(), s.files, dir.clone());
+            let now = (s.line.clone(), s.files, dir.clone(), s.views.clone());
             if last.as_ref() != Some(&now) {
                 show_status(&handle, s, dir);
                 last = Some(now);
@@ -419,6 +427,7 @@ fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
         accounts: s.files,
         folder: dir.map(|d| d.display().to_string()),
         paused: ui.shared.cfg.lock().unwrap().paused,
+        files: s.views.clone(),
     };
     *ui.uploads.lock().unwrap() = state.clone();
     let _ = app.emit("uploads", state);

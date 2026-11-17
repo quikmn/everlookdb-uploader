@@ -39,8 +39,30 @@ pub fn cache_dir() -> PathBuf {
 pub struct Done {
     /// SHA-256 of the file content that was sent
     pub hash: String,
-    /// false: the server refused it (too big, not valid); not sent again until the file changes
+    /// false: the last try failed or was refused; it is tried again (see worker::backoff), and at once on start
     pub ok: bool,
+}
+
+/// What the window shows for one data file: the answer to its last upload. Kept across restarts so a failure
+/// stays visible (and is retried) after the app starts again.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct FileState {
+    /// "ok" (all taken), "partial" (some refused or skipped), "retry" (failed once, trying again), "failed"
+    pub level: String,
+    /// one sentence: the server's message, or one made from its counts
+    pub headline: String,
+    /// why scans were refused, one line each
+    #[serde(default)]
+    pub details: Vec<String>,
+    /// when this answer came (unix seconds)
+    #[serde(default)]
+    pub at: i64,
+    /// when it is tried again (unix seconds), while it keeps failing
+    #[serde(default)]
+    pub next_retry: Option<i64>,
+    /// failed tries in a row
+    #[serde(default)]
+    pub failures: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -56,6 +78,9 @@ pub struct Config {
     /// the tray's line about the last upload, kept across restarts
     #[serde(default)]
     pub last_status: Option<String>,
+    /// same keys as `done`: the last answer for each file, for the window
+    #[serde(default)]
+    pub uploads: BTreeMap<String, FileState>,
     /// `World of Warcraft` folders the player added by hand
     #[serde(default)]
     pub extra_roots: Vec<PathBuf>,
@@ -92,7 +117,7 @@ pub fn clamp_hours(h: f64) -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None }
     }
 }
 
