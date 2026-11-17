@@ -38,6 +38,7 @@
       <section class="uploads" aria-labelledby="uploads-title">
         <h2 class="rail-title" id="uploads-title">Uploads</h2>
         <p class="upload-line"><span class="dot" id="upload-dot"></span><span id="upload-text">Starting…</span></p>
+        <ul class="upload-files" id="upload-files" aria-label="Each file's last upload" hidden></ul>
         <label class="switch">
           <input type="checkbox" id="sw-uploads" role="switch">
           <span class="track" aria-hidden="true"></span>
@@ -106,6 +107,7 @@
       </div>
     </div>
 
+    <div class="notice bad upload-alert" id="upload-alert" role="alert" hidden></div>
     <div class="notice" id="notice" role="status" hidden></div>
     <p class="sr-only" id="announce" aria-live="polite"></p>
 

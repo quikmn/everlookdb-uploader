@@ -177,6 +177,19 @@ button { cursor: pointer; }
 .dot.busy { background: var(--warn); }
 .dot.error { background: var(--bad); }
 
+/* one row per watched file: its last upload's answer */
+.upload-files { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.ufile { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; color: var(--ink-2); }
+.ufile-body { min-width: 0; display: grid; gap: 1px; }
+.ufile p { margin: 0; overflow-wrap: anywhere; }
+.ufile-head { display: flex; gap: 8px; align-items: baseline; }
+.ufile-name { color: var(--ink); font-weight: 600; }
+.ufile-when { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ufile.partial .ufile-say, .ufile.retry .ufile-say { color: var(--warn); }
+.ufile.failed .ufile-say { color: var(--bad); }
+.ufile-why { margin: 2px 0 0; padding: 0; list-style: none; display: grid; gap: 1px; color: var(--ink-3); font-size: 12px; overflow-wrap: anywhere; }
+.ufile-next { color: var(--ink-3); font-size: 12px; }
+
 .switch {
   display: flex;
   align-items: center;
@@ -481,6 +494,7 @@ button { cursor: pointer; }
 .notice .where { color: var(--ink-3); }
 .notice .to { color: var(--ink); font-variant-numeric: tabular-nums; }
 .notice .close { grid-column: 2; grid-row: 1; align-self: start; }
+.upload-alert h3 { color: var(--bad); }
 
 @keyframes drop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 

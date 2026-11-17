@@ -97,11 +97,55 @@ function renderSettings() {
   $('app-version').textContent = `EverlookDB ${S.app.version}`;
 }
 
+// each file's last answer: green taken, amber partly taken (or failed once), red refused or failing
+const FILE_DOT = { ok: 'ok', partial: 'busy', retry: 'busy', failed: 'error' };
+
 function renderUploads(u) {
   if (!u) return;
   $('upload-text').textContent = u.paused ? 'Paused' : u.line;
   $('upload-dot').className = 'dot ' + (u.paused ? '' : u.kind);
   $('sw-uploads').checked = !u.paused;
+
+  const files = u.files || [];
+  const list = $('upload-files');
+  list.hidden = !files.length;
+  // the rows say it all; the one summary line is for when there are none (or uploads are paused)
+  $('upload-text').parentElement.hidden = files.length > 0 && !u.paused;
+  list.innerHTML = files
+    .map(
+      (f) => `<li class="ufile ${esc(f.level)}">
+        <span class="dot ${FILE_DOT[f.level] || ''}"></span>
+        <div class="ufile-body">
+          <p class="ufile-head"><span class="ufile-name">${esc(f.label)}</span>${f.when ? `<span class="ufile-when">${esc(f.when)}</span>` : ''}</p>
+          <p class="ufile-say">${esc(f.headline)}</p>
+          ${f.details.length ? `<ul class="ufile-why">${f.details.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}
+          ${f.next && !u.paused ? `<p class="ufile-next">${esc(f.next)}</p>` : ''}
+        </div>
+      </li>`
+    )
+    .join('');
+
+  // refused or failing again and again: said at the top of the window too, until it goes through
+  const bad = files.filter((f) => f.level === 'failed');
+  const alert = $('upload-alert');
+  alert.hidden = !bad.length;
+  if (!bad.length) return;
+  alert.innerHTML = `<h3>${esc(bad.length === 1 ? `${bad[0].label} isn't being uploaded` : `${bad.map((f) => f.label).join(', ')} aren't being uploaded`)}</h3>
+    <ul>${bad
+      .map(
+        (f) =>
+          `<li>${bad.length > 1 ? `<span class="where">${esc(f.label)}:</span> ` : ''}${esc(f.headline)}${
+            f.next && !u.paused ? ` <span class="where">· ${esc(f.next)}</span>` : ''
+          }</li>${f.details.map((d) => `<li class="where">${esc(d)}</li>`).join('')}`
+      )
+      .join('')}</ul>
+    <button class="link-button close" type="button" data-act="upload-now">Try now</button>`;
+}
+
+function uploadNow() {
+  invoke('upload_now');
+  $('upload-text').textContent = 'Uploading…';
+  $('upload-text').parentElement.hidden = false;
 }
 
 // ------------------------------------------------------------------------------------------------ hero
@@ -601,6 +645,8 @@ async function onAction(el) {
       break;
     case 'refresh':
       return loadCatalog(true);
+    case 'upload-now':
+      return uploadNow();
     case 'dismiss':
       $('notice').hidden = true;
       break;
@@ -783,10 +829,7 @@ $('hours').addEventListener('keydown', (e) => {
 });
 $('sw-start').addEventListener('change', (e) => invoke('set_setting', { name: 'autostart', value: e.target.checked }));
 $('sw-uploads').addEventListener('change', (e) => invoke('set_setting', { name: 'paused', value: !e.target.checked }));
-$('upload-now').addEventListener('click', () => {
-  invoke('upload_now');
-  $('upload-text').textContent = 'Uploading…';
-});
+$('upload-now').addEventListener('click', uploadNow);
 
 listen('progress', (e) => {
   const p = e.payload;
