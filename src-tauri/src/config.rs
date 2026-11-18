@@ -65,6 +65,29 @@ pub struct FileState {
     pub failures: u32,
 }
 
+/// The server's receipt for an accepted upload (8 characters), for the giveaway code (see giveaway.rs).
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct Receipt {
+    pub code: String,
+    /// when it came (unix seconds)
+    #[serde(default)]
+    pub at: i64,
+    /// the upload held a full auction house scan (auctions only)
+    #[serde(default)]
+    pub full_scan: bool,
+}
+
+/// The latest receipt per kind of file, over all accounts.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct Receipts {
+    /// EverlookDBAuctions.lua
+    #[serde(default)]
+    pub auctions: Option<Receipt>,
+    /// EverlookDB.lua (the Collector addon's data)
+    #[serde(default)]
+    pub collector: Option<Receipt>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     /// the `World of Warcraft/_forever_` folder
@@ -93,6 +116,9 @@ pub struct Config {
     /// the install the window shows (its flavor folder)
     #[serde(default)]
     pub selected: Option<String>,
+    /// the server's receipts for the giveaway code
+    #[serde(default)]
+    pub receipts: Receipts,
 }
 
 fn yes() -> bool {
@@ -117,7 +143,7 @@ pub fn clamp_hours(h: f64) -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default() }
     }
 }
 
@@ -207,5 +233,21 @@ mod tests {
         assert_eq!(c.set_hours(&serde_json::json!(500)), 168);
         assert_eq!(c.set_hours(&serde_json::json!(0)), 1);
         assert_eq!(c.update_hours, 1);
+    }
+
+    #[test]
+    fn receipts_persist() {
+        // an old config.json has none
+        let old: Config = serde_json::from_str(r#"{"auto_update": true}"#).unwrap();
+        assert_eq!(old.receipts, Receipts::default());
+        let c = Config {
+            receipts: Receipts {
+                auctions: Some(Receipt { code: "7K3M9QXZ".into(), at: 5, full_scan: true }),
+                collector: Some(Receipt { code: "00000001".into(), at: 6, full_scan: false }),
+            },
+            ..Default::default()
+        };
+        let back: Config = serde_json::from_slice(&serde_json::to_vec_pretty(&c).unwrap()).unwrap();
+        assert_eq!(back.receipts, c.receipts);
     }
 }

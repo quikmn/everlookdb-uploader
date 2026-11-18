@@ -49,6 +49,20 @@
           <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com/privacy.html">What gets uploaded</button>
         </p>
       </section>
+      <!-- shown only while the giveaway is on (src-tauri/src/giveaway.rs) -->
+      <section class="giveaway" id="giveaway" aria-labelledby="giveaway-title" hidden>
+        <h2 class="rail-title" id="giveaway-title">Giveaway code</h2>
+        <div class="gcode">
+          <code id="giveaway-code">EVL-0-0</code>
+          <button class="gcopy" type="button" data-act="copy-giveaway" id="giveaway-copy" title="Copy the giveaway code">
+            <svg class="i-copy" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/></svg>
+            <svg class="i-done" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>
+            <span id="giveaway-copy-label">Copy</span>
+          </button>
+        </div>
+        <ul class="gsteps" id="giveaway-steps" aria-label="What the giveaway needs"></ul>
+        <p class="fine" id="giveaway-note"></p>
+      </section>
       <section class="settings" aria-label="Settings">
         <label class="switch">
           <input type="checkbox" id="sw-auto" role="switch">

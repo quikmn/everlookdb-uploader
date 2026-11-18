@@ -83,7 +83,8 @@ everlookdb-uploader --background            start in the tray without opening th
 
 For testing: `EVERLOOKDB_UPLOADER_DIR` moves the settings folder (a copy started with it may run next to the real
 one and never opens its window by itself; click its tray icon), `EVERLOOKDB_WOW_ROOTS` replaces game detection with
-a list of folders, and `EVERLOOKDB_CATALOG` points the catalog at another URL or a local JSON file. Development builds
+a list of folders, and `EVERLOOKDB_CATALOG` points the catalog at another URL or a local JSON file. `EVERLOOKDB_GIVEAWAY=1` shows the giveaway code under
+Uploads even while it is switched off (`=0` hides it). Development builds
 fall back to `src-tauri/fixtures/catalog-sample.json` while the server catalog isn't reachable.
 
 ## Building
@@ -120,6 +121,11 @@ install over (its `EDB_OLD_*` names can be overridden to test it against a fake 
 3. When the Mac job has finished, run `scripts\release-windows.ps1 -LatestOnly`: `latest.json` then lists both
    platforms and the release is published.
 4. Put `dist\latest.json` at `https://everlookdb.com/uploader/latest.json`.
+
+The giveaway code under Uploads (`EVL-<auctions receipt>-<collector receipt>` from the server's upload receipts, with
+a checklist) ships switched off. To switch it on, set `ENABLED` to `true` in `src-tauri/src/giveaway.rs` (and `ENDS`
+to the first day it should no longer show), then release as above. It hides itself again on `ENDS`. Receipts are kept
+either way, so players who uploaded before it is switched on already have their code.
 
 GitHub secrets for the macOS job: `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD`, `APPSTORE_API_KEY_BASE64`,
 `APPSTORE_KEY_ID`, `APPSTORE_ISSUER_ID`, `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and the

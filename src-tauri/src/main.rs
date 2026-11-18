@@ -7,6 +7,7 @@ mod addons;
 mod blp;
 mod catalog;
 mod config;
+mod giveaway;
 mod icons;
 mod manager;
 mod worker;
@@ -203,6 +204,8 @@ struct UploadState {
     paused: bool,
     /// each watched file's last answer (no paths, no account names)
     files: Vec<worker::FileView>,
+    /// the giveaway code and checklist; None while the giveaway is off (giveaway::ENABLED)
+    giveaway: Option<giveaway::View>,
 }
 
 #[derive(Default)]
@@ -264,6 +267,7 @@ fn run(args: Args) {
             addon_icons,
             copy_addon_list,
             save_addon_list,
+            copy_giveaway_code,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -352,18 +356,27 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
         pause,
         tx: Mutex::new(tx),
         shared: shared.clone(),
-        uploads: Mutex::new(UploadState { line: "Starting…".into(), kind: "idle", paused, ..Default::default() }),
+        uploads: Mutex::new(UploadState {
+            line: "Starting…".into(),
+            kind: "idle",
+            paused,
+            giveaway: giveaway::view_if_shown(&shared.cfg.lock().unwrap().receipts),
+            ..Default::default()
+        }),
         catalog: Mutex::new(CatalogState::default()),
         icon_files: Mutex::new(HashMap::new()),
     });
     std::thread::spawn(icons::prune);
 
     let handle = app.clone();
-    let mut last: Option<(String, usize, Option<PathBuf>, Vec<worker::FileView>)> = None;
+    let mut last: Option<(String, usize, Option<PathBuf>, Vec<worker::FileView>, config::Receipts)> = None;
     std::thread::spawn(move || {
         Watcher::new(shared.clone()).run(rx, |s: &Status| {
-            let dir = shared.cfg.lock().unwrap().wow_dir.clone();
-            let now = (s.line.clone(), s.files, dir.clone(), s.views.clone());
+            let (dir, receipts) = {
+                let c = shared.cfg.lock().unwrap();
+                (c.wow_dir.clone(), c.receipts.clone())
+            };
+            let now = (s.line.clone(), s.files, dir.clone(), s.views.clone(), receipts);
             if last.as_ref() != Some(&now) {
                 show_status(&handle, s, dir);
                 last = Some(now);
@@ -415,6 +428,10 @@ fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
         let tip: String = format!("EverlookDB\n{}", s.line).chars().take(120).collect();
         let _ = tray.set_tooltip(Some(tip));
     }
+    let (paused, receipts) = {
+        let c = ui.shared.cfg.lock().unwrap();
+        (c.paused, c.receipts.clone())
+    };
     let state = UploadState {
         line: s.line.clone(),
         kind: match s.kind {
@@ -426,8 +443,9 @@ fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
         },
         accounts: s.files,
         folder: dir.map(|d| d.display().to_string()),
-        paused: ui.shared.cfg.lock().unwrap().paused,
+        paused,
         files: s.views.clone(),
+        giveaway: giveaway::view_if_shown(&receipts),
     };
     *ui.uploads.lock().unwrap() = state.clone();
     let _ = app.emit("uploads", state);
@@ -603,6 +621,14 @@ fn copy_addon_list(ui: State<Ui>, install: String) -> Result<usize, String> {
     let (_, text, n) = addon_list_text(&ui, &install)?;
     set_clipboard(&text)?;
     Ok(n)
+}
+
+/// Copy the giveaway code to the clipboard (whatever parts it has). Returns the code.
+#[tauri::command(async)]
+fn copy_giveaway_code(ui: State<Ui>) -> Result<String, String> {
+    let code = giveaway::view(&ui.shared.cfg.lock().unwrap().receipts).code;
+    set_clipboard(&code)?;
+    Ok(code)
 }
 
 #[cfg(windows)]

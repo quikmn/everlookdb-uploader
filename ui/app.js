@@ -102,6 +102,7 @@ const FILE_DOT = { ok: 'ok', partial: 'busy', retry: 'busy', failed: 'error' };
 
 function renderUploads(u) {
   if (!u) return;
+  renderGiveaway(u.giveaway);
   $('upload-text').textContent = u.paused ? 'Paused' : u.line;
   $('upload-dot').className = 'dot ' + (u.paused ? '' : u.kind);
   $('sw-uploads').checked = !u.paused;
@@ -140,6 +141,58 @@ function renderUploads(u) {
       )
       .join('')}</ul>
     <button class="link-button close" type="button" data-act="upload-now">Try now</button>`;
+}
+
+// ------------------------------------------------------------------------------------------------ giveaway
+
+// The giveaway code: null while the giveaway is off (giveaway::ENABLED in src-tauri/src/giveaway.rs).
+const GIVEAWAY_STEPS = [
+  { key: null, done: 'EverlookDB app installed' },
+  {
+    key: 'auctions',
+    done: 'Full auction house scan uploaded',
+    how: 'Do a full scan in EverlookDB Auctions, then /reload or log out so the game saves it; the app uploads it.',
+  },
+  {
+    key: 'collector',
+    done: 'Collector data uploaded',
+    how: 'Play a while with the EverlookDB addon on, then /reload or log out so the game saves it; the app uploads it.',
+  },
+];
+
+function renderGiveaway(g) {
+  const box = $('giveaway');
+  box.hidden = !g;
+  if (!g) return;
+  $('giveaway-code').textContent = g.code;
+  $('giveaway-steps').innerHTML = GIVEAWAY_STEPS.map((st) => {
+    const ok = st.key === null || g[st.key];
+    return `<li class="gstep ${ok ? 'ok' : 'todo'}">
+      <span class="gmark" aria-hidden="true">${ok ? '✓' : '✗'}</span>
+      <div><p>${esc(st.done)}<span class="sr-only">${ok ? ': done' : ': not yet'}</span></p>${ok ? '' : `<p class="ghow">${esc(st.how)}</p>`}</div>
+    </li>`;
+  }).join('');
+  $('giveaway-note').textContent = g.complete
+    ? 'All three done. Paste this code where the giveaway asks for it.'
+    : 'The giveaway needs all three. You can copy the code now; it fills in as the uploads go through.';
+}
+
+let giveawayTimer = 0;
+async function copyGiveaway() {
+  try {
+    const code = await invoke('copy_giveaway_code');
+    const b = $('giveaway-copy');
+    $('giveaway-copy-label').textContent = 'Copied';
+    b.classList.add('done');
+    $('announce').textContent = `Copied ${code} to the clipboard`;
+    clearTimeout(giveawayTimer);
+    giveawayTimer = setTimeout(() => {
+      $('giveaway-copy-label').textContent = 'Copy';
+      b.classList.remove('done');
+    }, 2400);
+  } catch (e) {
+    showError(`Couldn’t copy the giveaway code: ${e}`);
+  }
 }
 
 function uploadNow() {
@@ -647,6 +700,8 @@ async function onAction(el) {
       return loadCatalog(true);
     case 'upload-now':
       return uploadNow();
+    case 'copy-giveaway':
+      return copyGiveaway();
     case 'dismiss':
       $('notice').hidden = true;
       break;

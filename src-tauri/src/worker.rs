@@ -10,8 +10,8 @@
 // path (which holds the account folder name) is only used locally; the window and the log name a file by what it
 // is ("Auctions", "Game data") and, with several accounts, by number, never by the account's name.
 
-use crate::config::{self, Config, Done, FileState};
-use crate::wow;
+use crate::config::{self, Config, Done, FileState, Receipt};
+use crate::{giveaway, wow};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -122,6 +122,11 @@ pub struct Answer {
     pub skipped_rows: u64,
     pub message: Option<String>,
     pub scans: Vec<Scan>,
+    /// the server's receipt for this upload (8 Crockford base32 characters), for the giveaway code
+    pub receipt: Option<String>,
+    /// auctions: the upload held a full auction house scan. The server's `full_scan` when it says; otherwise any
+    /// scan taken or already had (the server refuses a file without a full scan).
+    pub full_scan: bool,
     /// the one-sentence answer for the window and the tray
     pub text: String,
 }
@@ -163,8 +168,13 @@ pub fn parse_answer(v: &Value) -> Answer {
         skipped_rows: num("skipped_rows"),
         message: text_of(&v["message"]),
         scans: parse_scans(&v["scans"]),
+        receipt: v["receipt"].as_str().and_then(giveaway::receipt),
+        full_scan: false,
         text: String::new(),
     };
+    if a.is_auctions() {
+        a.full_scan = v["full_scan"].as_bool().or_else(|| v["full"].as_bool()).unwrap_or(a.accepted + a.known > 0);
+    }
     a.text = if a.is_auctions() { a.sentence() } else { summary(v) };
     a
 }
@@ -539,6 +549,17 @@ impl Watcher {
                     for s in &ans.scans {
                         config::log(&scan_log(s));
                     }
+                    if let Some(code) = &ans.receipt {
+                        let auctions = is_auctions(f);
+                        config::log(&format!("  receipt {code}{}", if auctions && ans.full_scan { " (full scan)" } else { "" }));
+                        let r = Receipt { code: code.clone(), at, full_scan: auctions && ans.full_scan };
+                        let mut c = self.shared.cfg.lock().unwrap();
+                        if auctions {
+                            giveaway::keep_auctions(&mut c.receipts, r);
+                        } else {
+                            c.receipts.collector = Some(r);
+                        }
+                    }
                     remember(&self.shared, &k, hash, true, state, Some(line.clone()));
                     event = Some((if level == "ok" { Kind::Ok } else { Kind::Busy }, line));
                 }
@@ -721,6 +742,28 @@ mod tests {
         assert_eq!(a.text, "Uploaded: 9 NPCs, 22 loot sources");
         assert_eq!(parse_answer(&json!({"status":"duplicate"})).text, "Up to date (nothing new)");
         assert_eq!(parse_answer(&json!({"status":"updated","accepted":{"quests":2}})).text, "Updated: 2 quests");
+    }
+
+    #[test]
+    fn receipts_in_answers() {
+        // auctions: the receipt, and a full scan when a scan was taken or already had
+        let a = parse_answer(&json!({"kind":"auctions","status":"added","accepted":1,"known":0,"receipt":"7k3m9qxz"}));
+        assert_eq!((a.receipt.as_deref(), a.full_scan), (Some("7K3M9QXZ"), true));
+        let known = parse_answer(&json!({"kind":"auctions","status":"duplicate","accepted":0,"known":2,"receipt":"7K3M9QXZ"}));
+        assert!(known.full_scan);
+        // the server's own word wins
+        let said = parse_answer(&json!({"kind":"auctions","status":"added","accepted":1,"receipt":"7K3M9QXZ","full_scan":false}));
+        assert!(!said.full_scan);
+        let none = parse_answer(&json!({"kind":"auctions","status":"partial","accepted":0,"known":0,"rejected":1}));
+        assert_eq!((none.receipt, none.full_scan), (None, false));
+        // collector data
+        let c = parse_answer(&json!({"status":"added","accepted":{"npcs":9},"receipt":"ABCDEFGH"}));
+        assert_eq!((c.receipt.as_deref(), c.full_scan), (Some("ABCDEFGH"), false));
+        assert_eq!(c.text, "Uploaded: 9 NPCs");
+        // an older server: none; a receipt that isn't one: ignored
+        assert_eq!(parse_answer(&json!({"status":"added"})).receipt, None);
+        assert_eq!(parse_answer(&json!({"status":"added","receipt":"not-a-receipt"})).receipt, None);
+        assert_eq!(parse_answer(&json!({"status":"added","receipt":12345678})).receipt, None);
     }
 
     #[test]
