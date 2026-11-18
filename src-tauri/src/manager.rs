@@ -120,6 +120,8 @@ pub struct Item {
     /// `version` and `latest` as the window shows them ("Plater-v664" -> "v664"; catalog::version_label)
     pub version_label: Option<String>,
     pub latest_label: Option<String>,
+    /// when the newest version was released (the catalog's time, RFC 3339), shown next to its Update button
+    pub latest_released: Option<String>,
     pub update: bool,
     pub previous: Option<String>,
     pub url: Option<String>,
@@ -217,6 +219,7 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                 ours: entry.is_some_and(|a| a.ours),
                 custom: entry.is_some_and(|a| a.custom),
                 latest_label: latest.as_deref().map(version_label),
+                latest_released: entry.filter(|_| latest.is_some()).map(|a| a.released.clone()).filter(|r| !r.is_empty()),
                 latest,
                 previous: record.and_then(|r| r.previous.as_ref().filter(|p| p.zip.is_file()).map(|p| p.version.clone())),
                 url: entry.map(|a| a.url.clone()).or(toc.website.clone()),
@@ -761,24 +764,34 @@ pub const NO_GAME: &str = "This game isn't installed here (only leftover files),
 
 /// The addons we installed in `install` that have a newer version in the catalog. None when the game isn't there:
 /// nothing is downloaded into a folder no game uses.
-pub fn pending<'a>(install: &Install, catalog: &'a Catalog) -> Vec<&'a Addon> {
+pub fn pending<'a>(install: &Install, catalog: &'a Catalog) -> Vec<(&'a Addon, Vec<String>)> {
     if !install.game {
         return Vec::new();
     }
-    let records = Records::load().of(&install.id);
-    records
-        .iter()
-        .filter_map(|(id, rec)| catalog.get(id).filter(|a| a.file_for(&install.accepts).is_some() && differs(Some(&rec.version), &a.version)))
+    // Every addon matched to the catalog with a newer version, also ones another app or the player put there
+    // (players expect "update by itself" to mean all of them). Those are taken over: their folders are passed as
+    // consent, and install() backs up the old copy first.
+    list(install, Some(catalog))
+        .into_iter()
+        .filter(|it| it.update && it.catalog && (it.managed || adoptable(install, it)))
+        .filter_map(|it| catalog.get(&it.key).map(|a| (a, if it.managed { Vec::new() } else { it.folders.clone() })))
         .collect()
 }
 
-/// Update every addon we installed that has a newer version in the catalog. `progress` gets the addon's id with
+/// An addon we didn't install that auto-update may replace: not a developer's git checkout, and a real version
+/// (not a packager placeholder like "@project-version@", which would always look outdated).
+fn adoptable(install: &Install, it: &Item) -> bool {
+    let real_version = it.version.as_deref().is_some_and(|v| !v.contains('@'));
+    real_version && !it.folders.iter().any(|f| install.addons_dir.join(f).join(".git").exists())
+}
+
+/// Update every addon we know (see `pending`) that has a newer version in the catalog. `progress` gets the addon's id with
 /// each download report.
 pub fn update_all(install: &Install, catalog: &Catalog, progress: &mut dyn FnMut(&str, u64, u64)) -> (Vec<Change>, Vec<String>) {
     let mut done = Vec::new();
     let mut failed = Vec::new();
-    for addon in pending(install, catalog) {
-        match self::install(install, addon, &[], &mut |d, t| progress(&addon.id, d, t)) {
+    for (addon, consent) in pending(install, catalog) {
+        match self::install(install, addon, &consent, &mut |d, t| progress(&addon.id, d, t)) {
             Ok(c) => done.push(c),
             Err(e) => failed.push(format!("{}: {e}", addon.name)),
         }

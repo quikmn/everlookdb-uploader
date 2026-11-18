@@ -66,6 +66,8 @@ async function loadCatalog(refresh) {
   S.catalog = r.catalog;
   S.origin = r.origin;
   S.checked = r.checked;
+  S.auto = r.auto;
+  S.next = r.next;
   S.catIndex = new Map();
   for (const a of S.catalog?.addons || []) {
     S.catIndex.set(a.id, Search.index(a.name, [a.author, a.summary, ...(a.folders || [])]));
@@ -365,11 +367,12 @@ function mineHtml(i) {
       <p>It may be in the addon list.</p>
       <button class="btn gold" type="button" data-act="tab" data-tab="browse">Search all addons for “${esc(q)}”</button></div>`;
   }
-  const updates = i.game ? S.items.filter((it) => it.update && it.managed) : [];
+  // always there: one click checks the addon list again and updates every addon that has a newer version
+  const updates = i.game ? S.items.filter((it) => it.update && it.catalog) : [];
   const bar =
-    updates.length && !q
-      ? `<div class="updates-bar"><p>${plural(updates.length, 'update', 'updates')} ready</p>
-         <button class="btn solid" type="button" data-act="update-all" ${busyAttrs('*')}>Update all</button></div>`
+    i.game && !q
+      ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready` : 'Everything is up to date'}</p>
+         <button class="btn solid" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon for a new version, then updates all that have one">Update all</button></div>`
       : '';
   return bar + `<ul class="rows">${items.map((it) => mineRow(it, i)).join('')}</ul>`;
 }
@@ -464,7 +467,7 @@ function mineRow(it, i) {
   if (!i.game && it.update && it.catalog) {
     action = noGame();
   } else if (it.update && it.catalog) {
-    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}>Update to ${esc(it.latest_label || it.latest)}</button>`;
+    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}>Update to ${esc(it.latest_label || it.latest)}</button>${releasedLine(it.latest_released)}`;
   } else if (it.catalog && it.latest) {
     action = `<span class="state ok">${CHECK}Up to date</span>`;
   } else if (it.catalog) {
@@ -583,7 +586,7 @@ function browseRow(a, i, it, runs) {
   } else if (!runs) {
     action = `<span class="state">Not for ${esc(i.name)}</span>`;
   } else if (it && it.update) {
-    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version_label || a.version)}</button>`;
+    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version_label || a.version)}</button>${releasedLine(a.released)}`;
   } else if (it) {
     action = `<span class="state ok">${CHECK}Installed</span>`;
   } else {
@@ -604,18 +607,49 @@ function browseRow(a, i, it, runs) {
   </li>`;
 }
 
+// an exact local date and time people read at a glance: "today 00:01", "yesterday 22:23", "17 Nov 2026, 14:05"
+function when(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d)) return '';
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const day = new Date(d); day.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((today - day) / 86400000);
+  if (days === 0) return `today ${time}`;
+  if (days === 1) return `yesterday ${time}`;
+  if (days === -1) return `tomorrow ${time}`;
+  return `${d.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })}, ${time}`;
+}
+const exact = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleString() : ''; };
+
+// under an Update button: when that version came out
+const releasedLine = (iso) => (when(iso) ? `<div class="released" title="${esc(exact(iso))}">released ${esc(when(iso))}</div>` : '');
+
+// the automatic check, for the footer: when it last ran, what it did, and when it runs next
+function autoLine() {
+  const a = S.auto;
+  const parts = [];
+  if (a) {
+    const did = a.off ? 'checked only (updating by itself is off)' : a.failed ? `${a.updated} updated, ${a.failed} failed` : a.updated ? `updated ${plural(a.updated, 'addon', 'addons')}` : 'nothing to update';
+    parts.push(`Auto check ran ${when(a.at)}: ${did}`);
+  }
+  if (S.next) parts.push(`next ${when(S.next)}`);
+  return parts.join(' · ');
+}
+
 function renderStatus(text) {
   const n = (S.catalog?.addons || []).filter((a) => !a.custom).length;
   const line =
     text ||
     {
-      live: `Addon list checked at ${S.checked}`,
+      live: `Addon list checked ${when(S.checked)}`,
       cache: 'Offline: using the addon list from last time',
       sample: 'Sample addon list: the everlookdb.com catalog isn’t live yet',
       none: 'The addon list couldn’t load',
     }[S.origin] ||
     'Loading the addon list…';
-  $('status').innerHTML = `<span>${esc(line)}${n ? `&ensp;${plural(n, 'addon', 'addons')} from GitHub and Tukui` : ''}</span>
+  const auto = text ? '' : autoLine();
+  $('status').innerHTML = `<span>${esc(line)}${n ? `&ensp;${plural(n, 'addon', 'addons')} from GitHub and Tukui` : ''}${auto ? `<br><span class="auto-line" title="${esc(S.auto ? exact(S.auto.at) : '')}">${esc(auto)}</span>` : ''}</span>
     <button class="link-button" type="button" data-act="refresh">Check now</button>`;
 }
 
@@ -688,11 +722,15 @@ async function onAction(el) {
     case 'install':
       return doInstall(el.dataset.id, el.dataset.take === '1');
     case 'update-all':
-      return run('*', 'Updating…', async () => {
+      return run('*', 'Checking…', async () => {
+        // the newest versions first, so one click never misses a release from the last hour
+        await loadCatalog(true);
         const r = await invoke('update_all', { install: S.sel });
-        if (r.changes.length || r.failed.length) {
-          showChanges(r.changes.length ? `Updated ${plural(r.changes.length, 'addon', 'addons')}` : 'Nothing was updated', r.changes, r.failed);
-        }
+        showChanges(
+          r.changes.length ? `Updated ${plural(r.changes.length, 'addon', 'addons')}` : r.failed.length ? 'Nothing was updated' : 'Everything is up to date',
+          r.changes,
+          r.failed,
+        );
       });
     case 'rollback':
       return run(el.dataset.id, 'Going back…', async () => {
@@ -1333,7 +1371,8 @@ listen('settings', () => loadState());
 listen('installs', () => loadState().then(loadItems));
 listen('updated', (e) => {
   const { changes, failed } = e.payload;
-  showChanges(changes.length ? `Updated ${plural(changes.length, 'addon', 'addons')} by itself` : 'An automatic update didn’t work', changes, failed);
+  const at = when(new Date().toISOString());
+  showChanges(changes.length ? `Updated ${plural(changes.length, 'addon', 'addons')} by itself, ${at}` : `An automatic update didn’t work, ${at}`, changes, failed);
   loadItems();
 });
 

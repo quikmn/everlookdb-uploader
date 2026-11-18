@@ -215,7 +215,26 @@ struct UploadState {
 struct CatalogState {
     catalog: Option<Arc<Catalog>>,
     origin: Option<Origin>,
+    /// when the addon list was last fetched (local time, RFC 3339)
     checked: Option<String>,
+    /// the last automatic check: when, and what it did
+    auto: Option<AutoRun>,
+    /// when the next automatic check is due (local time, RFC 3339)
+    next: Option<String>,
+}
+
+/// One run of the automatic check, for the window's footer.
+#[derive(Serialize, Clone)]
+struct AutoRun {
+    at: String,
+    /// "Update addons by itself" was off: the list was checked, nothing installed
+    off: bool,
+    updated: usize,
+    failed: usize,
+}
+
+fn now_rfc3339() -> String {
+    chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
 }
 
 impl Ui {
@@ -751,6 +770,8 @@ struct CatalogReply {
     catalog: Option<Arc<Catalog>>,
     origin: Option<Origin>,
     checked: Option<String>,
+    auto: Option<AutoRun>,
+    next: Option<String>,
 }
 
 /// The catalog; `refresh` fetches it again first.
@@ -762,7 +783,7 @@ async fn get_catalog(app: AppHandle, refresh: bool) -> Result<CatalogReply, Stri
             refresh_catalog(&ui);
         }
         let c = ui.catalog.lock().unwrap();
-        Ok(CatalogReply { catalog: c.catalog.clone(), origin: c.origin, checked: c.checked.clone() })
+        Ok(CatalogReply { catalog: c.catalog.clone(), origin: c.origin, checked: c.checked.clone(), auto: c.auto.clone(), next: c.next.clone() })
     })
     .await
 }
@@ -792,7 +813,7 @@ fn refresh_catalog(ui: &Ui) {
         c.catalog = Some(Arc::new(cat));
     }
     c.origin = Some(origin);
-    c.checked = Some(chrono::Local::now().format("%H:%M").to_string());
+    c.checked = Some(now_rfc3339());
 }
 
 /// A download's progress, for the window ("progress" event): addon `id` in `install`, `done` of `total` bytes
@@ -1105,17 +1126,25 @@ fn spawn_hourly(app: AppHandle) {
             }
             last = Some(now);
             let ui = app.state::<Ui>();
+            let next = chrono::Local::now() + chrono::Duration::hours(i64::from(hours));
+            ui.catalog.lock().unwrap().next = Some(next.to_rfc3339_opts(chrono::SecondsFormat::Secs, false));
             // the window may have just loaded it
             if !(first && ui.catalog().is_some()) {
                 refresh_catalog(&ui);
                 let _ = app.emit("catalog", ());
             }
             first = false;
+            let note = |off: bool, updated: usize, failed: usize| {
+                ui.catalog.lock().unwrap().auto = Some(AutoRun { at: now_rfc3339(), off, updated, failed });
+                let _ = app.emit("catalog", ());
+            };
             if !ui.shared.cfg.lock().unwrap().auto_update {
+                note(true, 0, 0);
                 continue;
             }
             let Some(cat) = ui.catalog() else { continue };
             let out = update_installs(&app, &installs(&ui), &cat);
+            note(false, out.changes.len(), out.failed.len());
             for f in &out.failed {
                 config::log(&format!("auto-update failed: {f}"));
             }
