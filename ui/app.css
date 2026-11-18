@@ -712,7 +712,72 @@ button { cursor: pointer; }
 .row-more p { margin: 0; max-width: 72ch; }
 .row-more .folders { color: var(--ink-3); overflow-wrap: anywhere; }
 .row-more .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.row-more .confirm { display: flex; gap: 8px; align-items: center; color: var(--ink); }
+/* "Uninstall X?": a red-edged card naming the addon and every folder that goes */
+.row-more .confirm {
+  display: grid;
+  gap: 8px;
+  max-width: 72ch;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 143, 134, 0.35);
+  border-left: 3px solid var(--bad);
+  border-radius: var(--r-m);
+  background: rgba(255, 143, 134, 0.06);
+  color: var(--ink-2);
+  animation: drop 0.12s ease-out;
+}
+.row-more .confirm strong { color: var(--ink); font-weight: 600; }
+.confirm-folders { display: flex; flex-wrap: wrap; gap: 5px; }
+.confirm-folders code {
+  font: 12px/1.4 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  padding: 2px 7px;
+  border-radius: var(--r-s);
+  background: var(--night);
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+}
+.row-more .confirm-note { color: var(--ink-3); }
+.confirm-actions { display: flex; gap: 8px; margin-top: 2px; }
+.btn.danger:hover { background: rgba(255, 143, 134, 0.1); border-color: rgba(255, 143, 134, 0.55); }
+
+/* the right-click menu on addon rows: the toolbar menu's look, at the pointer */
+.row.ctx-on { background: var(--raise); box-shadow: inset 2px 0 0 var(--sky); }
+.menu.ctx {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: auto;
+  z-index: 50;
+  min-width: 216px;
+  max-width: 320px;
+}
+.menu.ctx button { display: flex; align-items: center; gap: 10px; padding: 7px 12px 7px 9px; }
+.menu.ctx button span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.menu.ctx svg { flex: none; width: 15px; height: 15px; fill: none; stroke: var(--ink-3); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.menu.ctx button:hover svg, .menu.ctx button:focus-visible svg { stroke: var(--ink-2); }
+.menu.ctx button.danger, .menu.ctx button.danger svg { color: var(--bad); stroke: var(--bad); }
+.menu.ctx button.danger:hover, .menu.ctx button.danger:focus-visible { background: rgba(255, 143, 134, 0.12); }
+.menu.ctx button[aria-disabled='true'] { color: var(--ink-3); cursor: default; }
+.menu.ctx button[aria-disabled='true']:hover { background: none; }
+.menu.ctx .sep { height: 1px; margin: 4px 6px; background: var(--line-2); }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;
+  z-index: 60;
+  transform: translate(-50%, 8px);
+  padding: 7px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-m);
+  background: var(--raise-2);
+  color: var(--ink);
+  font-size: 13px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
 
 .empty {
   padding: 48px 0;

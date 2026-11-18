@@ -583,34 +583,177 @@ pub fn rollback(install: &Install, id: &str) -> Result<Change, String> {
     Ok(Change { install: install.name.clone(), name: rec.name, from: Some(rec.version), to: prev.version })
 }
 
-/// Remove an addon we installed: its folders, its kept zips, its record. Nothing else.
-pub fn remove(install: &Install, id: &str) -> Result<String, String> {
+/// What uninstalling one listed addon does: the folders that go to the Recycle Bin, and the ones that stay because
+/// another addon lists them too.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Plan {
+    pub key: String,
+    pub name: String,
+    pub folders: Vec<String>,
+    pub kept: Vec<String>,
+    /// installed by EverlookDB: its record and kept zips go too
+    pub managed: bool,
+}
+
+/// One plain folder name, as a direct child of AddOns: not empty, not `.` or `..`, no separators, no drive, no
+/// trailing dot or space (Windows would drop them and name another folder).
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains(['/', '\\', ':', '\0'])
+        && !name.ends_with(['.', ' '])
+        && matches!(Path::new(name).components().collect::<Vec<_>>()[..], [std::path::Component::Normal(_)])
+}
+
+/// A link: a symlink or a junction (any reparse point), which is never followed or removed.
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
+/// The path of folder `name` in `addons_dir`, when it may be removed: a real folder directly in AddOns (never AddOns
+/// itself, nothing outside it), and not a link or junction.
+pub fn removable(addons_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    if !plain_name(name) {
+        return Err(format!("“{name}” isn't a folder in AddOns, so nothing was removed."));
+    }
+    let p = addons_dir.join(name);
+    if p.parent() != Some(addons_dir) {
+        return Err(format!("“{name}” isn't a folder in AddOns, so nothing was removed."));
+    }
+    let meta = std::fs::symlink_metadata(&p).map_err(|e| format!("Can't read {name} in AddOns ({e}), so nothing was removed."))?;
+    if is_link(&meta) {
+        return Err(format!("{name} is a link to another folder (a junction or shortcut). EverlookDB doesn't remove links, so nothing was removed."));
+    }
+    if !meta.is_dir() {
+        return Err(format!("{name} isn't a folder, so nothing was removed."));
+    }
+    Ok(p)
+}
+
+/// Split an addon's folders into the ones that go and the ones another addon lists too (`others`, lower case).
+fn split_shared(folders: &[String], others: &HashSet<String>) -> (Vec<String>, Vec<String>) {
+    folders.iter().cloned().partition(|f| !others.contains(&f.to_ascii_lowercase()))
+}
+
+/// What uninstalling the listed addon `key` would remove. Every folder that goes is checked (`removable`) first.
+pub fn plan(install: &Install, catalog: Option<&Catalog>, key: &str) -> Result<Plan, String> {
+    let items = list(install, catalog);
+    let it = items.iter().find(|i| i.key == key).ok_or("That addon isn't in the AddOns folder any more.")?;
+    let records = Records::load().of(&install.id);
+    // folders another listed addon has, or another addon EverlookDB installed lists, are kept
+    let others: HashSet<String> = items
+        .iter()
+        .filter(|o| o.key != key)
+        .flat_map(|o| o.folders.iter())
+        .chain(records.iter().filter(|(k, _)| k.as_str() != key).flat_map(|(_, r)| r.folders.iter()))
+        .map(|f| f.to_ascii_lowercase())
+        .collect();
+    let (folders, kept) = split_shared(&it.folders, &others);
+    if folders.is_empty() {
+        return Err(format!("Every folder of {} belongs to another addon too, so there's nothing to remove on its own.", it.name));
+    }
+    for f in &folders {
+        removable(&install.addons_dir, f)?;
+    }
+    Ok(Plan { key: key.to_string(), name: it.name.clone(), folders, kept, managed: it.managed })
+}
+
+/// Moves one folder out of the way for good (the Recycle Bin, in the app; a test folder in tests).
+pub type Trash<'a> = &'a mut dyn FnMut(&Path) -> Result<(), String>;
+
+/// Uninstall a listed addon, whoever installed it: exactly the folders the player confirmed (`confirmed`, from
+/// `plan`) go to the Recycle Bin. For one EverlookDB installed, its kept zips and its record go too. Nothing else is
+/// recorded or changed.
+pub fn uninstall(install: &Install, catalog: Option<&Catalog>, key: &str, confirmed: &[String], trash: Trash) -> Result<Plan, String> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut records = Records::load();
-    let rec = records.of(&install.id).get(id).cloned().ok_or("EverlookDB didn't install this addon, so it leaves it alone")?;
-    if install.addons_dir.is_dir() {
-        let staging = staging_for(&install.addons_dir)?;
-        let mut err = None;
-        for f in &rec.folders {
-            let p = install.addons_dir.join(f);
-            if p.exists() {
-                if let Err(e) = std::fs::rename(&p, staging.join(f)) {
-                    err = Some(format!("can't remove {f} (is the game running?): {e}"));
-                }
-            }
-        }
-        let _ = std::fs::remove_dir_all(&staging);
-        if let Some(e) = err {
-            return Err(e);
+    let p = plan(install, catalog, key)?;
+    let same = |a: &[String], b: &[String]| {
+        let set = |x: &[String]| x.iter().map(|f| f.to_ascii_lowercase()).collect::<HashSet<_>>();
+        set(a) == set(b)
+    };
+    if !same(&p.folders, confirmed) {
+        return Err(format!("{}'s folders changed since you asked. Nothing was removed; try again.", p.name));
+    }
+    // all checked again right before anything moves
+    let paths: Vec<PathBuf> = p.folders.iter().map(|f| removable(&install.addons_dir, f)).collect::<Result<_, _>>()?;
+    let mut failed = Vec::new();
+    for (f, path) in p.folders.iter().zip(&paths) {
+        if let Err(e) = trash(path) {
+            failed.push(format!("{f} ({e})"));
         }
     }
-    let _ = std::fs::remove_dir_all(zip_dir(install, id));
-    if let Some(m) = records.installs.get_mut(&install.id) {
-        m.remove(id);
+    if !failed.is_empty() {
+        config::log(&format!("uninstalling {key} from {}: {}", install.id, failed.join("; ")));
+        return Err(format!("Couldn't remove {} (is the game running?): {}", p.name, failed.join(", ")));
     }
-    records.save()?;
-    config::log(&format!("removed {id} from {}", install.id));
-    Ok(rec.name)
+    if p.managed {
+        let _ = std::fs::remove_dir_all(zip_dir(install, key));
+        let mut records = Records::load();
+        if let Some(m) = records.installs.get_mut(&install.id) {
+            m.remove(key);
+        }
+        records.save()?;
+    }
+    config::log(&format!("uninstalled {key} from {} (to the Recycle Bin): {}", install.id, p.folders.join(", ")));
+    Ok(p)
+}
+
+/// Move a folder to the Recycle Bin (Windows shell; links inside are moved as links, never followed). Never a
+/// silent permanent delete: when the Recycle Bin can't take it, Windows asks first.
+#[cfg(windows)]
+pub fn recycle(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_NORECURSEREPARSE, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE,
+        SHFILEOPSTRUCTW,
+    };
+    if !path.is_absolute() {
+        return Err("not a full path".into());
+    }
+    // a list of paths, each ending in a NUL, the list in another
+    let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
+    from.extend([0, 0]);
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: std::ptr::null_mut(),
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING | FOF_NORECURSEREPARSE) as u16,
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+    let code = unsafe { SHFileOperationW(&mut op) };
+    if code != 0 {
+        return Err(format!("Windows error {code:#x}"));
+    }
+    if op.fAnyOperationsAborted != 0 || std::fs::symlink_metadata(path).is_ok() {
+        return Err("it's still there".into());
+    }
+    Ok(())
+}
+
+/// Move a folder to the Trash (macOS and others: ~/.Trash, under a new name when one is taken).
+#[cfg(not(windows))]
+pub fn recycle(path: &Path) -> Result<(), String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("no home folder")?;
+    let bin = home.join(".Trash");
+    std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+    let name = path.file_name().ok_or("no folder name")?.to_string_lossy().into_owned();
+    let mut dest = bin.join(&name);
+    let mut n = 1;
+    while dest.exists() {
+        n += 1;
+        dest = bin.join(format!("{name} {n}"));
+    }
+    std::fs::rename(path, &dest).map_err(|e| e.to_string())
 }
 
 /// Why nothing is installed or updated in a folder without the game (leftover files of an uninstalled game).
@@ -896,9 +1039,167 @@ mod tests {
         let bad = Addon { files: vec![file("EverlookDB.zip", 12)], version: "v9".into(), ..v1.clone() };
         assert!(super::install(&install, &bad, &[], &mut |_, _| {}).unwrap_err().contains("bytes"));
 
-        assert_eq!(remove(&install, "github:quikmn/EverlookDB").unwrap(), "EverlookDB Collector");
+        let key = "github:quikmn/EverlookDB";
+        let p = plan(&install, None, key).unwrap();
+        assert!(p.managed);
+        let done = uninstall(&install, None, key, &p.folders, &mut |path: &Path| std::fs::remove_dir_all(path).map_err(|e| e.to_string())).unwrap();
+        assert_eq!(done.name, "EverlookDB Collector");
         assert!(!pre.exists());
         assert!(Records::load().of(&install.id).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// a test install in a temp folder, with addon folders made from (folder, toc text)
+    fn test_install(name: &str, tocs: &[(&str, &str)]) -> (PathBuf, Install) {
+        let d = tmp(name);
+        let root = d.join("World of Warcraft");
+        let addons_dir = root.join("_forever_").join("Interface").join("AddOns");
+        for (folder, text) in tocs {
+            std::fs::create_dir_all(addons_dir.join(folder)).unwrap();
+            std::fs::write(addons_dir.join(folder).join(format!("{folder}.toc")), text).unwrap();
+        }
+        std::fs::create_dir_all(&addons_dir).unwrap();
+        (d, crate::wow::installs_in(&root).pop().unwrap())
+    }
+
+    /// stands in for the Recycle Bin: moves the folder into `bin`, and remembers what it was given
+    fn bin_trash<'a>(bin: &'a Path, given: &'a mut Vec<String>) -> impl FnMut(&Path) -> Result<(), String> + 'a {
+        move |p: &Path| {
+            std::fs::create_dir_all(bin).unwrap();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            given.push(name.clone());
+            std::fs::rename(p, bin.join(name)).map_err(|e| e.to_string())
+        }
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn uninstalls_an_addon_from_elsewhere_exactly() {
+        let (d, install) = test_install(
+            "unmanaged",
+            &[
+                ("Titan", "## Title: Titan Panel\n## Version: 9.3.6\n"),
+                ("TitanBag", "## Title: Titan Bag\n## Dependencies: Titan\n"),
+                ("TitanXP", "## Title: Titan XP\n## Dependencies: Titan\n"),
+                ("TomTom", "## Title: TomTom\n"),
+                ("Titanic", "## Title: Not Titan\n"),
+            ],
+        );
+        let addons = install.addons_dir.clone();
+        // a loose file in AddOns is never touched
+        std::fs::write(addons.join("readme.txt"), "x").unwrap();
+        let items = list(&install, None);
+        let titan = items.iter().find(|i| i.name == "Titan Panel").unwrap();
+        assert!(!titan.managed && !titan.catalog);
+        let p = plan(&install, None, &titan.key).unwrap();
+        assert_eq!(p.folders, vec!["Titan", "TitanBag", "TitanXP"]);
+        assert!(p.kept.is_empty() && !p.managed);
+
+        // what the player confirmed must be what goes
+        let bin = d.join("bin");
+        let mut given = Vec::new();
+        let err = uninstall(&install, None, &titan.key, &["Titan".into()], &mut bin_trash(&bin, &mut given)).unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        assert!(given.is_empty());
+
+        let done = uninstall(&install, None, &titan.key, &p.folders, &mut bin_trash(&bin, &mut given)).unwrap();
+        assert_eq!(done.name, "Titan Panel");
+        assert_eq!(given, vec!["Titan", "TitanBag", "TitanXP"]);
+        assert_eq!(names(&addons), vec!["Titanic", "TomTom", "readme.txt"]);
+        assert_eq!(names(&bin), vec!["Titan", "TitanBag", "TitanXP"]);
+        // nothing recorded
+        assert!(Records::load().of(&install.id).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn refuses_anything_but_a_real_folder_in_addons() {
+        let (d, install) = test_install("refuse", &[("Real", "## Title: Real\n")]);
+        let addons = install.addons_dir.clone();
+        std::fs::create_dir_all(d.join("Outside")).unwrap();
+        std::fs::write(addons.join("loose.lua"), "x").unwrap();
+        for bad in ["", ".", "..", "../Outside", "..\\Outside", "Real/..", "Real\\Sub", "C:\\Windows", "/etc", "C:Outside", "Real.", "Real "] {
+            assert!(removable(&addons, bad).is_err(), "{bad:?} must be refused");
+        }
+        assert!(removable(&addons, "Missing").is_err());
+        assert!(removable(&addons, "loose.lua").is_err());
+        assert_eq!(removable(&addons, "Real").unwrap(), addons.join("Real"));
+
+        // a junction to a folder outside AddOns: listed like any addon, but never removed or followed
+        let target = d.join("Elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("Linked.toc"), "## Title: Linked\n").unwrap();
+        let link = addons.join("Linked");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&target).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let err = removable(&addons, "Linked").unwrap_err();
+        assert!(err.contains("link"), "{err}");
+        let item = list(&install, None).into_iter().find(|i| i.folders == ["Linked"]).unwrap();
+        assert!(plan(&install, None, &item.key).unwrap_err().contains("link"));
+        let mut given = Vec::new();
+        let bin = d.join("bin");
+        assert!(uninstall(&install, None, &item.key, &["Linked".into()], &mut bin_trash(&bin, &mut given)).is_err());
+        assert!(given.is_empty());
+        assert!(target.join("Linked.toc").exists() && link.exists());
+        std::fs::remove_dir(&link).unwrap(); // unlinks the junction only
+        assert!(target.join("Linked.toc").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn keeps_folders_another_addon_lists() {
+        let (d, install) = test_install("shared", &[("Alpha", "## Title: Alpha\n"), ("Alpha_Shared", "## Title: Shared lib\n"), ("Beta", "## Title: Beta\n")]);
+        // Beta, installed by EverlookDB, lists Alpha_Shared too
+        let mut records = Records::load();
+        records.installs.entry(install.id.clone()).or_default().insert(
+            "github:x/Beta".into(),
+            Record { id: "github:x/Beta".into(), name: "Beta".into(), version: "1".into(), folders: vec!["Beta".into(), "Alpha_Shared".into()], ..Default::default() },
+        );
+        records.save().unwrap();
+        let items = list(&install, None);
+        let alpha = items.iter().find(|i| i.name == "Alpha").unwrap();
+        assert_eq!(alpha.folders, vec!["Alpha"], "the record claimed Alpha_Shared first");
+
+        // pure split: the shared folder stays
+        let others: HashSet<String> = ["alpha_shared".to_string()].into();
+        let (go, kept) = split_shared(&["Alpha".into(), "Alpha_Shared".into()], &others);
+        assert_eq!((go, kept), (vec!["Alpha".to_string()], vec!["Alpha_Shared".to_string()]));
+
+        let p = plan(&install, None, &alpha.key).unwrap();
+        assert_eq!(p.folders, vec!["Alpha"]);
+        let bin = d.join("bin");
+        let mut given = Vec::new();
+        uninstall(&install, None, &alpha.key, &p.folders, &mut bin_trash(&bin, &mut given)).unwrap();
+        assert_eq!(names(&install.addons_dir), vec!["Alpha_Shared", "Beta"]);
+        // Beta's record is untouched
+        assert!(Records::load().of(&install.id).contains_key("github:x/Beta"));
+
+        // removing Beta (ours) takes its folders and its record
+        let p = plan(&install, None, "github:x/Beta").unwrap();
+        assert!(p.managed);
+        assert_eq!(p.folders, vec!["Beta", "Alpha_Shared"]);
+        uninstall(&install, None, "github:x/Beta", &p.folders, &mut bin_trash(&bin, &mut given)).unwrap();
+        assert!(names(&install.addons_dir).is_empty());
+        assert!(Records::load().of(&install.id).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The real Recycle Bin, on a temp folder: `cargo test recycles -- --ignored`. Leaves one small folder named
+    /// edb-mgr-recycle-... in the Recycle Bin.
+    #[test]
+    #[ignore = "puts a test folder in the Recycle Bin"]
+    fn recycles_for_real() {
+        let d = tmp("recycle");
+        let f = d.join("EdbRecycleTest");
+        std::fs::create_dir_all(f.join("Sub")).unwrap();
+        std::fs::write(f.join("Sub").join("x.lua"), "x").unwrap();
+        recycle(&f).unwrap();
+        assert!(!f.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

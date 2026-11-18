@@ -22,6 +22,8 @@ const S = {
   busy: new Map(),
   progress: new Map(),
   confirm: null,
+  // what "Uninstall" would remove, from uninstall_plan, for the confirmation of S.confirm
+  plan: null,
   showOther: false,
   catIndex: new Map(),
   // addon icons for the selected install, by row key: a data: URL, or null (no icon: a letter tile)
@@ -471,7 +473,7 @@ function mineRow(it, i) {
     action = `<span class="state" title="Installed by you or another app. EverlookDB leaves it alone.">Not from our sources</span>`;
   }
   const meta = [it.author ? `<span class="author">${esc(it.author)}</span>` : '', it.notes ? esc(it.notes) : ''].filter(Boolean).join('&ensp;');
-  return `<li class="row">
+  return `<li class="row" data-row="${esc(key)}">
     <div class="row-main">
       ${iconHtml(key, it.name)}
       <button class="row-head" type="button" data-act="toggle" data-key="${esc(key)}" aria-expanded="${open}">
@@ -497,27 +499,41 @@ function mineMore(it, i) {
   if (it.catalog && !it.managed && it.latest && !it.update && i.game) {
     actions.push(`<button class="btn" type="button" data-act="install" data-id="${esc(key)}" data-take="1" ${busyAttrs(key)} title="Reinstalls it from its source; the copy there now is kept in EverlookDB's backups folder">Keep it updated with EverlookDB</button>`);
   }
-  if (it.managed) {
-    if (S.confirm === key) {
-      actions.push(`<span class="confirm">Remove ${esc(it.name)} and its ${plural(it.folders.length, 'folder', 'folders')}?
-        <button class="btn danger" type="button" data-act="remove" data-id="${esc(key)}" ${busyAttrs(key)}>Remove</button>
-        <button class="btn" type="button" data-act="cancel">Cancel</button></span>`);
-    } else {
-      actions.push(`<button class="btn danger" type="button" data-act="ask-remove" data-id="${esc(key)}">Remove</button>`);
-    }
-  }
+  const asking = S.confirm === key && S.plan?.key === key;
+  if (!asking) actions.push(`<button class="btn danger" type="button" data-act="ask-remove" data-id="${esc(key)}">Uninstall</button>`);
   const who = it.managed
     ? it.custom
-      ? 'Installed by EverlookDB from its GitHub link. EverlookDB checks the repository for new releases; Remove stops that.'
+      ? 'Installed by EverlookDB from its GitHub link. EverlookDB checks the repository for new releases; uninstalling stops that.'
       : 'Installed by EverlookDB.'
     : it.catalog
       ? 'Installed by you or another app. EverlookDB can update it; it only replaces these folders when you ask.'
-      : 'Installed by you or another app, from a source EverlookDB doesn’t have. EverlookDB never changes it.';
+      : 'Installed by you or another app, from a source EverlookDB doesn’t have. EverlookDB only changes it if you uninstall it here.';
   return `<div class="row-more">
     ${it.notes ? `<p>${esc(it.notes)}</p>` : ''}
     <p>${who}</p>
     <p class="folders">${plural(it.folders.length, 'folder', 'folders')}: ${it.folders.map(esc).join(', ')}</p>
     ${actions.length ? `<div class="actions">${actions.join('')}</div>` : ''}
+    ${asking ? confirmHtml(it, S.plan) : ''}
+  </div>`;
+}
+
+// "Uninstall X?": names the addon and every folder that goes (and any kept because another addon uses them too)
+function confirmHtml(it, p) {
+  const n = p.folders.length;
+  const kept = p.kept.length
+    ? `<p class="confirm-note">Kept, because another addon uses ${p.kept.length === 1 ? 'it' : 'them'} too: ${p.kept.map(esc).join(', ')}</p>`
+    : '';
+  const ours = p.managed
+    ? `<p class="confirm-note">EverlookDB stops updating it${it.custom ? ' (and stops checking its GitHub repository, when no other game has it)' : ''}.</p>`
+    : '';
+  return `<div class="confirm" role="group" aria-labelledby="confirm-title">
+    <p id="confirm-title"><strong>Uninstall ${esc(p.name)}?</strong> ${n === 1 ? 'Its folder goes' : `Its ${n} folders go`} to the Recycle Bin, so you can get ${n === 1 ? 'it' : 'them'} back from there.</p>
+    <p class="confirm-folders">${p.folders.map((f) => `<code>${esc(f)}</code>`).join(' ')}</p>
+    ${kept}${ours}
+    <div class="confirm-actions">
+      <button class="btn danger" type="button" data-act="remove" data-id="${esc(p.key)}" ${busyAttrs(p.key)}>Uninstall</button>
+      <button class="btn" type="button" data-act="cancel">Cancel</button>
+    </div>
   </div>`;
 }
 
@@ -575,7 +591,7 @@ function browseRow(a, i, it, runs) {
   }
   const page = a.ours && ourPage(a.id);
   const where = page ? 'everlookdb.com' : a.source === 'tukui' ? 'Tukui' : a.source === 'github' ? 'GitHub' : a.source;
-  return `<li class="row${runs ? '' : ' dim'}">
+  return `<li class="row${runs ? '' : ' dim'}" data-row="${esc(a.id)}">
     <div class="row-main">
       ${iconHtml(a.id, a.name)}
       <button class="row-head" type="button" data-act="url" data-url="${esc(page || a.url)}" title="Open ${esc(a.name)} on ${esc(where)}">
@@ -684,23 +700,30 @@ async function onAction(el) {
         showChanges(`${c.name} is back to ${c.to}`, [c]);
       });
     case 'ask-remove':
-      S.confirm = el.dataset.id;
-      renderList();
-      document.querySelector('[data-act="remove"]')?.focus();
-      break;
-    case 'cancel':
+      return askRemove(el.dataset.id);
+    case 'cancel': {
+      const k = S.confirm;
       S.confirm = null;
+      S.plan = null;
       renderList();
+      if (k) document.querySelector(`[data-act="ask-remove"][data-id="${CSS.escape(k)}"]`)?.focus();
       break;
-    case 'remove':
-      return run(el.dataset.id, 'Removing…', async () => {
-        const name = await invoke('remove_addon', { install: S.sel, id: el.dataset.id });
+    }
+    case 'remove': {
+      const id = el.dataset.id;
+      const folders = S.plan?.key === id ? S.plan.folders : [];
+      return run(id, 'Removing…', async () => {
+        const name = await invoke('remove_addon', { install: S.sel, id, folders });
         S.confirm = null;
-        S.open.delete(el.dataset.id);
-        showChanges(`Removed ${name}`, []);
+        S.plan = null;
+        S.open.delete(id);
+        showChanges(`Removed ${name} (in the Recycle Bin)`, []);
         // an addon from a GitHub link leaves the list with its last install
         await loadCatalog(false);
       });
+    }
+    case 'copy-name':
+      return copyName(el.dataset.name);
     case 'url':
       if (el.dataset.url) invoke('open_url', { url: el.dataset.url }).catch((e) => showError(String(e)));
       break;
@@ -811,15 +834,251 @@ async function selectInstall(id) {
   S.icons.clear();
   S.iconWait.clear();
   S.confirm = null;
+  S.plan = null;
   renderRail();
   renderHero();
   invoke('set_setting', { name: 'selected', value: id });
   await loadItems();
 }
 
+// ------------------------------------------------------------------------------------------------ uninstall
+
+// ask Rust what would go (and what stays), then show the confirmation in the addon's row, opened
+async function askRemove(key) {
+  hideCtx();
+  let plan;
+  try {
+    plan = await invoke('uninstall_plan', { install: S.sel, id: key });
+  } catch (e) {
+    return showError(String(e));
+  }
+  S.plan = plan;
+  S.confirm = key;
+  S.open.add(key);
+  if (S.tab !== 'mine') setTab('mine', false);
+  else renderList();
+  const b = document.querySelector(`[data-act="remove"][data-id="${CSS.escape(key)}"]`);
+  b?.closest('.row')?.scrollIntoView({ block: 'nearest' });
+  b?.focus();
+}
+
+// ------------------------------------------------------------------------------------------------ right-click menu
+
+// line icons, like the toolbar's
+const ICON = {
+  update: '<path d="M8 2.5v7.5M4.5 6.5L8 10l3.5-3.5"/><path d="M3 12.5h10"/>',
+  install: '<path d="M8 2.5v7.5M4.5 6.5L8 10l3.5-3.5"/><path d="M3 12.5h10"/>',
+  installed: '<path d="M3.5 8.5l3 3 6-7"/>',
+  folder: '<path d="M2.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h4.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z"/>',
+  link: '<path d="M9 3.5h3.5V7M12.5 3.5L7 9"/><path d="M11 9.5v2.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2.5"/>',
+  copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/>',
+  trash: '<path d="M3 4.5h10M6.5 4.5V3a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 .5.5v1.5M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8"/>',
+};
+
+// where an addon's link goes, said plainly
+const sourceLabel = (url) =>
+  /^https:\/\/github\.com\//i.test(url) ? 'View source on GitHub' : /tukui\.org/i.test(url) ? 'View on Tukui' : 'Open project page';
+
+// the menu for the row with this key, on the tab shown: [{ label, icon, act, data, danger, off }] and '-' lines
+function ctxItems(key) {
+  const i = install();
+  if (!i) return [];
+  const out = [];
+  const busy = S.busy.has(key) || S.busy.has('*');
+  const links = (page, url) => {
+    if (page) out.push({ label: 'About it on everlookdb.com', icon: 'link', act: 'url', data: { url: page } });
+    if (url && url.startsWith('https://') && url !== page) out.push({ label: sourceLabel(url), icon: 'link', act: 'url', data: { url } });
+  };
+  if (S.tab === 'mine') {
+    const it = S.items.find((x) => x.key === key);
+    if (!it) return [];
+    if (it.update && it.catalog && i.game) {
+      out.push({ label: `Update to ${it.latest_label || it.latest}`, icon: 'update', act: 'install', data: { id: key, take: it.managed ? '' : '1' }, off: busy });
+    }
+    out.push({ label: 'Open folder', icon: 'folder', act: 'open-folder', data: {} });
+    links(it.ours && ourPage(key), it.url);
+    out.push({ label: 'Copy name', icon: 'copy', act: 'copy-name', data: { name: it.name } });
+    out.push('-');
+    out.push({ label: 'Uninstall…', icon: 'trash', act: 'ask-remove', data: { id: key }, danger: true, off: busy });
+    return out;
+  }
+  const a = (S.catalog?.addons || []).find((x) => x.id === key);
+  if (!a) return [];
+  const it = S.items.find((x) => x.catalog && x.key === a.id);
+  if (i.game && fileFor(a, i.accepts)) {
+    if (it && it.update) {
+      out.push({ label: `Update to ${a.version_label || a.version}`, icon: 'update', act: 'install', data: { id: a.id, take: it.managed ? '' : '1' }, off: busy });
+    } else if (it) {
+      out.push({ label: 'Installed', icon: 'installed', off: true });
+    } else {
+      out.push({ label: 'Install', icon: 'install', act: 'install', data: { id: a.id }, off: busy });
+    }
+  }
+  links(a.ours && ourPage(a.id), a.url);
+  out.push({ label: 'Copy name', icon: 'copy', act: 'copy-name', data: { name: a.name } });
+  return out;
+}
+
+const CTX = { key: null, back: null };
+
+function openCtx(row, x, y, back) {
+  const items = ctxItems(row.dataset.row);
+  if (!items.length) return hideCtx();
+  const menu = $('ctx');
+  menu.innerHTML = items
+    .map((m) => {
+      if (m === '-') return '<div class="sep" role="separator"></div>';
+      const data = Object.entries(m.data || {})
+        .map(([k, v]) => ` data-${k}="${esc(v)}"`)
+        .join('');
+      return `<button type="button" role="menuitem" tabindex="-1"${m.act && !m.off ? ` data-act="${m.act}"${data}` : ''}${m.danger ? ' class="danger"' : ''}${
+        m.off ? ' aria-disabled="true"' : ''
+      }><svg viewBox="0 0 16 16" aria-hidden="true">${ICON[m.icon] || ''}</svg><span>${esc(m.label)}</span></button>`;
+    })
+    .join('');
+  const name = row.querySelector('.row-name .t')?.textContent || '';
+  menu.setAttribute('aria-label', name);
+  document.querySelector('.row.ctx-on')?.classList.remove('ctx-on');
+  row.classList.add('ctx-on');
+  CTX.key = row.dataset.row;
+  CTX.back = back || row.querySelector('.row-head');
+  menu.hidden = false;
+  // at the pointer, kept inside the window
+  const w = menu.offsetWidth;
+  const h = menu.offsetHeight;
+  const left = Math.max(8, Math.min(x, innerWidth - w - 8));
+  const top = y + h > innerHeight - 8 ? Math.max(8, y - h) : y;
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  ctxMove(menu.querySelector('[role="menuitem"]:not([aria-disabled])') ? 'first' : null);
+}
+
+function hideCtx(refocus = false) {
+  const menu = $('ctx');
+  if (menu.hidden) return;
+  menu.hidden = true;
+  document.querySelector('.row.ctx-on')?.classList.remove('ctx-on');
+  if (refocus) {
+    // the row may have been drawn again while the menu was open
+    const head = CTX.back?.isConnected ? CTX.back : document.querySelector(`.row[data-row="${CSS.escape(CTX.key || '')}"] .row-head`);
+    head?.focus();
+  }
+  CTX.key = null;
+  CTX.back = null;
+}
+
+// arrow keys move between the items that can be chosen
+function ctxMove(where) {
+  if (!where) return;
+  const items = [...$('ctx').querySelectorAll('[role="menuitem"]:not([aria-disabled])')];
+  if (!items.length) return;
+  const at = items.indexOf(document.activeElement);
+  const n = items.length;
+  const next = where === 'first' ? 0 : where === 'last' ? n - 1 : where === 'down' ? (at + 1) % n : (at - 1 + n) % n;
+  items[next].focus();
+}
+
+$('ctx').addEventListener('keydown', (e) => {
+  const move = { ArrowDown: 'down', ArrowUp: 'up', Home: 'first', End: 'last' }[e.key];
+  if (move) {
+    e.preventDefault();
+    ctxMove(move);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    hideCtx(true);
+  } else if (e.key === 'Tab') {
+    e.preventDefault();
+    hideCtx(true);
+  }
+});
+
+// the browser's own menu (Back, Refresh, Print...) is no use in an app: only text fields keep it, for copy and paste
+const TEXT_FIELD = 'textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]), [contenteditable="true"]';
+document.addEventListener('contextmenu', (e) => {
+  if (e.target.closest(TEXT_FIELD)) return hideCtx();
+  e.preventDefault();
+  const row = e.target.closest('#list .row[data-row]');
+  if (!row || $('gh').open) return hideCtx();
+  // from the keyboard (menu key, Shift+F10) the menu opens under the focused row, not at the corner
+  if (e.button !== 2 || (!e.clientX && !e.clientY)) {
+    const r = (row.contains(document.activeElement) ? document.activeElement : row).getBoundingClientRect();
+    return openCtx(row, r.left + 24, r.bottom - 4, document.activeElement);
+  }
+  openCtx(row, e.clientX, e.clientY);
+});
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('#ctx')) hideCtx();
+});
+document.addEventListener('scroll', () => hideCtx(), true);
+window.addEventListener('resize', () => hideCtx());
+window.addEventListener('blur', () => hideCtx());
+
+// browser keys and mouse buttons that would reload, print or go "back" in the window; Rust turns them off too in
+// release builds (main.rs app_keys_only)
+document.addEventListener(
+  'keydown',
+  (e) => {
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (
+      k === 'F5' ||
+      k === 'BrowserBack' ||
+      k === 'BrowserForward' ||
+      k === 'BrowserRefresh' ||
+      (ctrl && (k === 'r' || k === 'p')) ||
+      (e.altKey && (k === 'ArrowLeft' || k === 'ArrowRight'))
+    ) {
+      e.preventDefault();
+    }
+  },
+  true
+);
+for (const t of ['mousedown', 'mouseup', 'auxclick']) {
+  window.addEventListener(t, (e) => {
+    if (e.button === 3 || e.button === 4) e.preventDefault();
+  });
+}
+
+// a short "Copied" at the bottom of the window
+let toastTimer = 0;
+function toast(text) {
+  let t = $('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    t.className = 'toast';
+    t.setAttribute('aria-hidden', 'true');
+    document.body.append(t);
+  }
+  t.textContent = text;
+  t.classList.add('on');
+  $('announce').textContent = text;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('on'), 1800);
+}
+
+async function copyName(name) {
+  hideCtx(true);
+  try {
+    await navigator.clipboard.writeText(name);
+  } catch {
+    const t = document.createElement('textarea');
+    t.value = name;
+    t.style.position = 'fixed';
+    t.style.opacity = '0';
+    document.body.append(t);
+    t.select();
+    document.execCommand('copy');
+    t.remove();
+  }
+  toast(`Copied “${name}”`);
+}
+
 // ------------------------------------------------------------------------------------------------ wiring
 
 document.addEventListener('click', (e) => {
+  if (!$('ctx').hidden) hideCtx(!!e.target.closest('#ctx') && !e.target.closest('[data-act]'));
   if (!$('list-menu').hidden && !e.target.closest('.list-tools')) showListMenu(false);
   const game = e.target.closest('[data-install]');
   if (game) return selectInstall(game.dataset.install);
@@ -852,6 +1111,10 @@ $('q').addEventListener('keydown', (e) => {
   }
 });
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('ctx').hidden) {
+    hideCtx(true);
+    return;
+  }
   if (e.key === 'Escape' && !$('list-menu').hidden) {
     showListMenu(false);
     $('list-menu-button').focus();

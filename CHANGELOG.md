@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Right-click an addon for its own menu: in My addons Update, Open folder, its project page, Copy name and
+  Uninstall; in Get addons Install (or Update), its project page and Copy name. Uninstall now works for every addon,
+  also ones you or another app installed (Titan Panel, TomTom...): it shows exactly which folders go, keeps any that
+  another addon uses too, and moves them to the Recycle Bin, so you can get them back. The browser's own menu (Back,
+  Refresh, Print) and its reload and print keys are gone; text fields still have copy and paste.
 - Install from GitHub: on Get addons, paste the link of an addon's GitHub page (or type it in the search box) and
   EverlookDB shows what it is (name, author, version, release date, the folders it adds, and whether it is made for
   your game) before installing it. It is then updated with your other addons and marked "from GitHub" in My addons;

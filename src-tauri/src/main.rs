@@ -267,6 +267,7 @@ fn run(args: Args) {
             list_installed,
             get_catalog,
             install_addon,
+            uninstall_plan,
             remove_addon,
             rollback_addon,
             update_all,
@@ -430,10 +431,30 @@ fn show_window(app: &AppHandle) {
         .background_color(tauri::window::Color(12, 20, 34, 255))
         .center()
         .build();
-    if let Err(e) = built {
-        config::log(&format!("window: {e}"));
+    match built {
+        Ok(w) => app_keys_only(&w),
+        Err(e) => config::log(&format!("window: {e}")),
     }
 }
+
+/// An app, not a browser: WebView2's browser keys (F5 / Ctrl+R reload, Ctrl+P print, Alt+Left back, F12 devtools,
+/// zoom) are off in release builds; copy, paste and undo still work. Debug builds keep them, for the devtools. The
+/// browser's right-click menu is replaced in app.js (it stays in text fields, for copy and paste).
+#[cfg(all(windows, not(debug_assertions)))]
+fn app_keys_only(w: &tauri::WebviewWindow) {
+    let _ = w.with_webview(|wv| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+        use windows_core::Interface;
+        let Ok(core) = wv.controller().CoreWebView2() else { return };
+        let Ok(settings) = core.Settings() else { return };
+        if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
+            let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+        }
+    });
+}
+
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn app_keys_only(_w: &tauri::WebviewWindow) {}
 
 fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
     let ui = app.state::<Ui>();
@@ -803,10 +824,26 @@ async fn install_addon(app: AppHandle, install: String, id: String, take_over: V
     .await
 }
 
+/// What uninstalling an addon would remove (its folders, and the ones kept because another addon lists them too),
+/// for the confirmation.
 #[tauri::command(async)]
-fn remove_addon(ui: State<Ui>, install: String, id: String) -> Result<String, String> {
+fn uninstall_plan(ui: State<Ui>, install: String, id: String) -> Result<manager::Plan, String> {
     let i = find_install(&ui, &install)?;
-    let name = manager::remove(&i, &id)?;
+    let cat = ui.catalog();
+    manager::plan(&i, cat.as_deref(), &id)
+}
+
+/// Uninstall any listed addon, whoever installed it: exactly the `folders` the player confirmed go to the Recycle
+/// Bin. Returns its name.
+#[tauri::command(async)]
+fn remove_addon(ui: State<Ui>, install: String, id: String, folders: Vec<String>) -> Result<String, String> {
+    let i = find_install(&ui, &install)?;
+    let cat = ui.catalog();
+    let done = manager::uninstall(&i, cat.as_deref(), &id, &folders, &mut manager::recycle)?;
+    let name = done.name;
+    if !done.managed {
+        return Ok(name);
+    }
     // an addon from a GitHub link that no install has any more: stop checking its repo
     let still = manager::Records::load().installs.values().any(|m| m.keys().any(|k| k.eq_ignore_ascii_case(&id)));
     if !still {
