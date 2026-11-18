@@ -41,6 +41,9 @@ pub struct Addon {
     /// a square picture the source gives for the addon (https), when the catalog has one
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub icon: String,
+    /// from a GitHub repo the player added (github.rs), not from the catalog
+    #[serde(default)]
+    pub custom: bool,
     /// `version` as the window shows it (see `version_label`); set by `fetch`
     #[serde(default, skip_deserializing)]
     pub version_label: String,
@@ -62,8 +65,17 @@ pub struct File {
 impl Addon {
     /// The file for an install that accepts these flavors (best first). When several files fit a flavor (Pawn ships
     /// `Pawn-…-Forever.zip` beside a main zip that also lists Forever), the one built for it wins: its name says the
-    /// flavor, then the one made for the fewest flavors.
+    /// flavor, then the one made for the fewest flavors. For a repo the player added, a zip whose game versions
+    /// nobody could tell (no interface numbers) is taken when none says it is for this one.
     pub fn file_for(&self, accepts: &[String]) -> Option<&File> {
+        let known = self.known_file_for(accepts);
+        if known.is_some() || !self.custom {
+            return known;
+        }
+        self.files.iter().find(|f| f.flavors.is_empty())
+    }
+
+    fn known_file_for(&self, accepts: &[String]) -> Option<&File> {
         accepts.iter().find_map(|f| {
             let word = match f.as_str() {
                 "classic_era" => "vanilla",

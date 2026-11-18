@@ -114,6 +114,8 @@ pub struct Item {
     /// installed by this app (we may update and remove it)
     pub managed: bool,
     pub ours: bool,
+    /// from a GitHub repo the player added by its link (not the catalog)
+    pub custom: bool,
     pub latest: Option<String>,
     /// `version` and `latest` as the window shows them ("Plater-v664" -> "v664"; catalog::version_label)
     pub version_label: Option<String>,
@@ -213,6 +215,7 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                 catalog: entry.is_some(),
                 managed: record.is_some(),
                 ours: entry.is_some_and(|a| a.ours),
+                custom: entry.is_some_and(|a| a.custom),
                 latest_label: latest.as_deref().map(version_label),
                 latest,
                 previous: record.and_then(|r| r.previous.as_ref().filter(|p| p.zip.is_file()).map(|p| p.version.clone())),
@@ -495,6 +498,10 @@ fn zip_dir(install: &Install, id: &str) -> PathBuf {
 pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress: OnProgress) -> Result<Change, String> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let file = addon.file_for(&install.accepts).ok_or_else(|| format!("{} has no download for {}", addon.name, install.name))?;
+    // from a repo the player added: only a zip attached to one of its GitHub releases
+    if addon.custom && !crate::github::safe_download(&file.url) {
+        return Err(format!("{}'s download isn't a GitHub release file; not installed", addon.name));
+    }
     let mut records = Records::load();
     let old = records.of(&install.id).get(&addon.id).cloned();
     let dir = zip_dir(install, &addon.id);

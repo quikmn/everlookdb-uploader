@@ -8,6 +8,7 @@ mod blp;
 mod catalog;
 mod config;
 mod giveaway;
+mod github;
 mod icons;
 mod manager;
 mod worker;
@@ -193,6 +194,8 @@ struct Ui {
     catalog: Mutex<CatalogState>,
     /// (install id, item key) -> the texture its .toc names as its icon (from the last list of that install)
     icon_files: Mutex<HashMap<(String, String), PathBuf>>,
+    /// addons looked up by their GitHub link and shown to the player, by id: what "Install" installs
+    github_seen: Mutex<HashMap<String, catalog::Addon>>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -277,6 +280,8 @@ fn run(args: Args) {
             copy_addon_list,
             save_addon_list,
             copy_giveaway_code,
+            github_lookup,
+            install_from_github,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -379,6 +384,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
         }),
         catalog: Mutex::new(CatalogState::default()),
         icon_files: Mutex::new(HashMap::new()),
+        github_seen: Mutex::new(HashMap::new()),
     });
     std::thread::spawn(icons::prune);
 
@@ -603,7 +609,8 @@ async fn addon_icons(app: AppHandle, install: String, keys: Vec<String>) -> Resu
                 .take(64)
                 .map(|k| {
                     let file = files.get(&(install.clone(), k.clone())).cloned();
-                    let url = cat.as_deref().and_then(|c| c.get(&k)).and_then(icons::source_url);
+                    let seen = || ui.github_seen.lock().unwrap().get(&k).and_then(icons::source_url);
+                    let url = cat.as_deref().and_then(|c| c.get(&k)).and_then(icons::source_url).or_else(seen);
                     (k, file, url)
                 })
                 .collect()
@@ -744,8 +751,21 @@ async fn blocking<T: Send + 'static>(app: AppHandle, f: impl FnOnce(&AppHandle) 
     tauri::async_runtime::spawn_blocking(move || f(&app)).await.map_err(|e| e.to_string())?
 }
 
+/// Fetch the catalog, and the newest release of each GitHub repo the player added (github.rs), merged into it.
 fn refresh_catalog(ui: &Ui) {
     let (cat, origin) = catalog::fetch(&ui.shared.server);
+    let repos = ui.shared.cfg.lock().unwrap().github_repos.clone();
+    let server = ui.shared.server.clone();
+    let custom = github::refresh(&repos, cat.as_ref(), &|repo| github::lookup(&server, repo));
+    let cat = match cat {
+        Some(c) => Some(c),
+        None if !custom.is_empty() => Some(Catalog { version: 1, ..Default::default() }),
+        None => None,
+    }
+    .map(|mut c| {
+        github::merge(&mut c, &custom);
+        c
+    });
     let mut c = ui.catalog.lock().unwrap();
     if let Some(cat) = cat {
         c.catalog = Some(Arc::new(cat));
@@ -786,7 +806,113 @@ async fn install_addon(app: AppHandle, install: String, id: String, take_over: V
 #[tauri::command(async)]
 fn remove_addon(ui: State<Ui>, install: String, id: String) -> Result<String, String> {
     let i = find_install(&ui, &install)?;
-    manager::remove(&i, &id)
+    let name = manager::remove(&i, &id)?;
+    // an addon from a GitHub link that no install has any more: stop checking its repo
+    let still = manager::Records::load().installs.values().any(|m| m.keys().any(|k| k.eq_ignore_ascii_case(&id)));
+    if !still {
+        let mut c = ui.shared.cfg.lock().unwrap();
+        if let Some(repo) = github::repo_of(&c, &id).cloned() {
+            github::forget(&mut c, &repo);
+            c.save();
+            drop(c);
+            let mut cs = ui.catalog.lock().unwrap();
+            if let Some(cat) = cs.catalog.as_deref() {
+                let mut cat = cat.clone();
+                cat.addons.retain(|a| !(a.custom && a.id.eq_ignore_ascii_case(&id)));
+                cs.catalog = Some(Arc::new(cat));
+            }
+            config::log(&format!("forgot GitHub repo {repo}"));
+        }
+    }
+    Ok(name)
+}
+
+/// What "Install from GitHub" shows before installing: the addon (the catalog's entry when the catalog lists the
+/// repo), the file it would install here and whether that is known to be for this game, the version installed now,
+/// and the folders already in AddOns that EverlookDB didn't install (installing replaces them, after a backup).
+#[derive(Serialize)]
+struct GithubPreview {
+    addon: catalog::Addon,
+    in_catalog: bool,
+    /// "yes": made for this game; "unknown": nobody can tell (it may still work); "no": for other game versions
+    fit: &'static str,
+    file: Option<catalog::File>,
+    installed: Option<String>,
+    existing: Vec<String>,
+}
+
+/// Look up a GitHub link (on everlookdb.com) for `install`.
+#[tauri::command]
+async fn github_lookup(app: AppHandle, install: String, link: String) -> Result<GithubPreview, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        let i = find_install(&ui, &install)?;
+        let repo = github::parse_repo(&link)?;
+        let cat = ui.catalog();
+        let (addon, in_catalog) = match github::in_catalog(cat.as_deref(), &github::id_of(&repo)) {
+            Some(a) => (a, true),
+            None => {
+                let a = github::lookup(&ui.shared.server, &repo)?;
+                // the server gives the catalog's own entry for a repo the catalog lists (renamed, other letter case)
+                match github::in_catalog(cat.as_deref(), &a.id) {
+                    Some(c) => (c, true),
+                    None => (catalog::Addon { custom: true, ..a }, false),
+                }
+            }
+        };
+        let file = addon.file_for(&i.accepts).cloned();
+        let fit = match &file {
+            Some(f) if f.flavors.is_empty() => "unknown",
+            Some(_) => "yes",
+            None => "no",
+        };
+        let records = manager::Records::load().of(&i.id);
+        let record = records.iter().find(|(k, _)| k.eq_ignore_ascii_case(&addon.id)).map(|(_, r)| r);
+        let existing = addon
+            .folders
+            .iter()
+            .filter(|f| i.addons_dir.join(f).exists() && !record.is_some_and(|r| r.folders.contains(f)))
+            .cloned()
+            .collect();
+        ui.github_seen.lock().unwrap().insert(addon.id.clone(), addon.clone());
+        Ok(GithubPreview { installed: record.map(|r| r.version.clone()), addon, in_catalog, fit, file, existing })
+    })
+    .await
+}
+
+/// Install an addon the player looked up by its GitHub link (github_lookup). `take_over`: the folders already in
+/// AddOns it may replace (the player saw them; they are backed up first). A repo the catalog doesn't list is
+/// remembered, so it is updated like the catalog's addons.
+#[tauri::command]
+async fn install_from_github(app: AppHandle, install: String, id: String, take_over: Vec<String>) -> Result<manager::Change, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        let i = find_install(&ui, &install)?;
+        if !i.game {
+            return Err(manager::NO_GAME.into());
+        }
+        let addon = ui.github_seen.lock().unwrap().get(&id).cloned().ok_or("Look the link up again, then install.")?;
+        let change = manager::install(&i, &addon, &take_over, &mut |done, total| {
+            let _ = app.emit("progress", Progress { install: &i.id, id: &addon.id, done, total, index: 1, count: 1 });
+        })?;
+        if addon.custom {
+            let repo = addon.id.strip_prefix("github:").unwrap_or(&addon.id).to_string();
+            {
+                let mut c = ui.shared.cfg.lock().unwrap();
+                github::remember(&mut c, &repo, &addon);
+                c.save();
+            }
+            let mut cs = ui.catalog.lock().unwrap();
+            let mut cat = cs.catalog.as_deref().cloned().unwrap_or(Catalog { version: 1, ..Default::default() });
+            let custom: Vec<catalog::Addon> =
+                cat.addons.iter().filter(|a| a.custom && !a.id.eq_ignore_ascii_case(&addon.id)).cloned().chain(std::iter::once(addon.clone())).collect();
+            github::merge(&mut cat, &custom);
+            cs.catalog = Some(Arc::new(cat));
+            config::log(&format!("added GitHub repo {repo}"));
+        }
+        Ok(change)
+    })
+    .await
 }
 
 #[tauri::command(async)]

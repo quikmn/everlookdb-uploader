@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Install from GitHub: on Get addons, paste the link of an addon's GitHub page (or type it in the search box) and
+  EverlookDB shows what it is (name, author, version, release date, the folders it adds, and whether it is made for
+  your game) before installing it. It is then updated with your other addons and marked "from GitHub" in My addons;
+  Remove takes it away and stops the checks. Addons already in EverlookDB's list install from there.
 - A new install now starts with Windows (opens at login on a Mac) by default, so your uploads and addon updates keep going without you opening the app. Turn it off in the window or the tray menu and it stays off. Installs from before this keep the setting they had.
 - Ready for the upcoming EverlookDB giveaway: the app keeps the receipt the site gives for each accepted upload,
   and will show your giveaway code under Uploads with a Copy button and a checklist of what is still missing (a full

@@ -231,7 +231,10 @@ function renderHero() {
 
 // ------------------------------------------------------------------------------------------------ list
 
-const fileFor = (a, accepts) => accepts.some((f) => (a.files || []).some((file) => (file.flavors || []).includes(f)));
+// a file for one of these flavors; for a repo added by its GitHub link, also a zip nobody could tell the game of
+const fileFor = (a, accepts) =>
+  accepts.some((f) => (a.files || []).some((file) => (file.flavors || []).includes(f))) ||
+  (!!a.custom && (a.files || []).some((file) => !(file.flavors || []).length));
 
 function renderList() {
   const list = $('list');
@@ -248,6 +251,8 @@ function renderList() {
   list.innerHTML = S.tab === 'mine' ? mineHtml(i) : browseHtml(i);
   fitVersions(list);
   $('list-tools').hidden = S.tab !== 'mine' || !S.items.length;
+  $('gh-open').hidden = S.tab !== 'browse';
+  if ($('gh').open) renderGh();
   paintProgress();
   watchIcons();
 }
@@ -312,7 +317,7 @@ async function loadIcons(keys) {
 // swap the tile for the icon in place, once the picture is decoded (no flash, no layout change)
 function paintIcon(key) {
   const url = S.icons.get(key);
-  for (const el of $('list').querySelectorAll(`.ico[data-icon="${CSS.escape(key)}"]`)) {
+  for (const el of document.querySelectorAll(`.ico[data-icon="${CSS.escape(key)}"]`)) {
     el.removeAttribute('data-icon');
     if (!url) continue;
     const img = new Image();
@@ -377,6 +382,11 @@ const OUR_PAGES = {
   craftcolors: 'https://everlookdb.com/craftcolors.html',
 };
 const ourPage = (id) => OUR_PAGES[String(id || '').split('/').pop().toLowerCase()] || null;
+
+// installed from a GitHub link the player pasted (not from the addon list)
+function ghMark(on) {
+  return on ? '<span class="ours gh" title="Added by its GitHub link. EverlookDB checks the repository for new releases.">from GitHub</span>' : '';
+}
 
 function oursMark(on) {
   return on ? '<span class="ours" title="Made by EverlookDB"><i></i>by EverlookDB</span>' : '';
@@ -465,7 +475,7 @@ function mineRow(it, i) {
     <div class="row-main">
       ${iconHtml(key, it.name)}
       <button class="row-head" type="button" data-act="toggle" data-key="${esc(key)}" aria-expanded="${open}">
-        <span class="row-name"><span class="t">${esc(it.name)}</span>${oursMark(it.ours)}</span>
+        <span class="row-name"><span class="t">${esc(it.name)}</span>${oursMark(it.ours)}${ghMark(it.custom)}</span>
         <span class="row-meta">${meta || '&nbsp;'}</span>
       </button>
       ${versionCell(it.version, it.version_label, 'Installed version')}
@@ -497,7 +507,9 @@ function mineMore(it, i) {
     }
   }
   const who = it.managed
-    ? 'Installed by EverlookDB.'
+    ? it.custom
+      ? 'Installed by EverlookDB from its GitHub link. EverlookDB checks the repository for new releases; Remove stops that.'
+      : 'Installed by EverlookDB.'
     : it.catalog
       ? 'Installed by you or another app. EverlookDB can update it; it only replaces these folders when you ask.'
       : 'Installed by you or another app, from a source EverlookDB doesn’t have. EverlookDB never changes it.';
@@ -524,9 +536,15 @@ function browseHtml(i) {
   const other = all.filter((x) => !x.runs);
   const LIMIT = 200;
   let html = '';
+  if (/github\.com\/|^[\w.-]+\/[\w.-]+$/i.test(q)) {
+    return `<div class="empty"><h3>Install it from its GitHub link?</h3>
+      <p>EverlookDB looks the addon up, shows you what it is, and installs it when you say so.</p>
+      <button class="btn gold" type="button" data-act="gh-open" data-link="${esc(q)}">Look up ${esc(q.replace(/^https?:\/\/(www\.)?/i, ''))}</button></div>`;
+  }
   if (!here.length && !other.length) {
     return `<div class="empty"><h3>No addon matches “${esc(q)}”</h3>
-      <p>Try a shorter word, the author’s name, or what it does (“bags”, “boss”, “quest”).</p></div>`;
+      <p>Try a shorter word, the author’s name, or what it does (“bags”, “boss”, “quest”).</p>
+      <p>Not in the list? If it’s on GitHub, <button class="link-button" type="button" data-act="gh-open">install it from its link</button>.</p></div>`;
   }
   if (!here.length) html += `<div class="empty"><h3>Nothing for ${esc(i.name)} matches “${esc(q)}”</h3></div>`;
   html += `<ul class="rows">${here.slice(0, LIMIT).map((x) => browseRow(x.a, i, installed.get(x.a.id), true)).join('')}</ul>`;
@@ -561,7 +579,7 @@ function browseRow(a, i, it, runs) {
     <div class="row-main">
       ${iconHtml(a.id, a.name)}
       <button class="row-head" type="button" data-act="url" data-url="${esc(page || a.url)}" title="Open ${esc(a.name)} on ${esc(where)}">
-        <span class="row-name"><span class="t">${esc(a.name)}</span>${oursMark(a.ours)}</span>
+        <span class="row-name"><span class="t">${esc(a.name)}</span>${oursMark(a.ours)}${ghMark(a.custom)}</span>
         <span class="row-meta"><span class="author">${esc(a.author)}</span>&ensp;${esc(a.summary)}</span>
       </button>
       ${versionCell(a.version, a.version_label, 'Latest version')}
@@ -571,7 +589,7 @@ function browseRow(a, i, it, runs) {
 }
 
 function renderStatus(text) {
-  const n = S.catalog?.addons.length || 0;
+  const n = (S.catalog?.addons || []).filter((a) => !a.custom).length;
   const line =
     text ||
     {
@@ -680,6 +698,8 @@ async function onAction(el) {
         S.confirm = null;
         S.open.delete(el.dataset.id);
         showChanges(`Removed ${name}`, []);
+        // an addon from a GitHub link leaves the list with its last install
+        await loadCatalog(false);
       });
     case 'url':
       if (el.dataset.url) invoke('open_url', { url: el.dataset.url }).catch((e) => showError(String(e)));
@@ -702,6 +722,13 @@ async function onAction(el) {
       return uploadNow();
     case 'copy-giveaway':
       return copyGiveaway();
+    case 'gh-open':
+      return openGh(el.dataset.link || '');
+    case 'gh-close':
+      $('gh').close();
+      break;
+    case 'gh-install':
+      return ghInstall(el.dataset.id);
     case 'dismiss':
       $('notice').hidden = true;
       break;
@@ -885,6 +912,147 @@ $('hours').addEventListener('keydown', (e) => {
 $('sw-start').addEventListener('change', (e) => invoke('set_setting', { name: 'autostart', value: e.target.checked }));
 $('sw-uploads').addEventListener('change', (e) => invoke('set_setting', { name: 'paused', value: !e.target.checked }));
 $('upload-now').addEventListener('click', uploadNow);
+
+// ------------------------------------------------------------------------------------------------ install from GitHub
+
+const GH = { preview: null, error: '', looking: false };
+const FLAVOR_NAMES = { retail: 'Retail', classic: 'Classic', classic_era: 'Classic Era', forever: 'WoW Forever', ptr: 'PTR', beta: 'Beta' };
+const andList = (xs) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+const size = (n) => (n >= 1048576 ? mb(n) : `${Math.max(1, Math.round(n / 1024))} KB`);
+const day = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+};
+
+function openGh(link) {
+  GH.preview = null;
+  GH.error = '';
+  $('gh-link').value = link;
+  renderGh();
+  if (!$('gh').open) $('gh').showModal();
+  $('gh-link').focus();
+  if (link) ghLookup();
+}
+
+async function ghLookup() {
+  const link = $('gh-link').value.trim();
+  if (GH.looking) return;
+  GH.preview = null;
+  GH.error = link ? '' : 'Paste the addon’s GitHub link first, like https://github.com/owner/addon.';
+  if (!link) return renderGh();
+  GH.looking = true;
+  renderGh();
+  try {
+    GH.preview = await invoke('github_lookup', { install: S.sel, link });
+  } catch (e) {
+    GH.error = String(e);
+  } finally {
+    GH.looking = false;
+    renderGh();
+  }
+}
+
+async function ghInstall(id) {
+  const p = GH.preview;
+  if (!p || S.busy.has(id)) return;
+  S.busy.set(id, p.installed ? 'Updating…' : 'Installing…');
+  GH.error = '';
+  renderGh();
+  try {
+    const c = await invoke('install_from_github', { install: S.sel, id, takeOver: p.existing });
+    $('gh').close();
+    showChanges(c.from ? `Updated ${c.name}` : `Installed ${c.name}`, [c]);
+    await loadCatalog(false);
+  } catch (e) {
+    GH.error = String(e);
+  } finally {
+    S.busy.delete(id);
+    S.progress.delete(id);
+    forgetIcons(id);
+    if ($('gh').open) renderGh();
+    await loadItems();
+  }
+}
+
+// one gold button at a time: "Look up" until there is something to install, then the install button
+function renderGh() {
+  const p = GH.preview;
+  const i = install();
+  const look = $('gh-look');
+  look.className = p ? 'btn' : 'btn solid';
+  look.disabled = GH.looking;
+  look.toggleAttribute('aria-busy', GH.looking);
+  if (GH.looking) look.dataset.busy = 'Looking up…';
+  $('gh-error').hidden = !GH.error;
+  $('gh-error').textContent = GH.error;
+  const box = $('gh-preview');
+  if (!p || !i) {
+    box.innerHTML = '';
+    return;
+  }
+  const a = p.addon;
+  const flavors = [...new Set((a.files || []).flatMap((f) => f.flavors || []))].map((f) => FLAVOR_NAMES[f] || f);
+  const notes = [];
+  let button = '';
+  const label = a.version_label || a.version;
+  if (p.in_catalog) notes.push(['', 'It’s in the EverlookDB addon list, so it installs and updates from there.']);
+  if (!i.game) {
+    notes.push(['bad', NO_GAME]);
+  } else if (p.fit === 'no') {
+    notes.push(['bad', `This release is for ${andList(flavors)}, not for ${i.name}. There’s nothing to install here.`]);
+  } else if (p.installed && p.installed === a.version) {
+    notes.push(['ok', `Already installed (${p.installed}). EverlookDB keeps it updated.`]);
+  } else {
+    if (p.fit === 'yes') notes.push(['ok', `Made for ${i.name}.`]);
+    else notes.push(['warn', `The release doesn’t say which game versions it’s for, so EverlookDB can’t tell whether it works in ${i.name}. You can install it anyway.`]);
+    if (p.existing.length) {
+      notes.push([
+        'warn',
+        `${andList(p.existing)} ${p.existing.length === 1 ? 'is' : 'are'} already in your AddOns folder and EverlookDB didn’t install ${p.existing.length === 1 ? 'it' : 'them'}. Installing replaces ${p.existing.length === 1 ? 'it' : 'them'}; the copies there now are kept in EverlookDB’s backups folder.`,
+      ]);
+    }
+    const verb = p.installed ? `Update to ${label}` : p.existing.length ? 'Replace and install' : p.fit === 'unknown' ? 'Install anyway' : 'Install';
+    button = `<button class="btn solid" type="button" data-act="gh-install" data-id="${esc(a.id)}" ${busyAttrs(a.id)}>${esc(verb)}</button>`;
+  }
+  const released = day(a.released);
+  const where = String(a.url || '').replace(/^https:\/\//, '');
+  box.innerHTML = `<article class="ghp">
+    <div class="ghp-head">
+      ${iconHtml(a.id, a.name)}
+      <div class="ghp-title">
+        <h3><span class="t">${esc(a.name)}</span>${a.custom ? ghMark(true) : oursMark(a.ours)}</h3>
+        <p>${a.author ? `by <span class="author">${esc(a.author)}</span>` : ''}</p>
+      </div>
+    </div>
+    ${a.summary ? `<p class="ghp-sum">${esc(a.summary)}</p>` : ''}
+    <dl class="ghp-facts">
+      <dt>Version</dt><dd><span title="${esc(a.version)}">${esc(label)}</span>${released ? `<span class="soft">released ${esc(released)}</span>` : ''}</dd>
+      <dt>${(a.folders || []).length === 1 ? 'Folder' : 'Folders'}</dt><dd>${(a.folders || []).length ? a.folders.map(esc).join(', ') : '<span class="soft">listed after unpacking</span>'}</dd>
+      ${p.file ? `<dt>File</dt><dd>${esc(p.file.name)}${p.file.size ? `<span class="soft">${esc(size(p.file.size))}</span>` : ''}</dd>` : ''}
+      ${flavors.length ? `<dt>For</dt><dd>${esc(andList(flavors))}</dd>` : ''}
+      ${a.url && a.url.startsWith('https://') ? `<dt>Source</dt><dd><button class="link-button" type="button" data-act="url" data-url="${esc(a.url)}">${esc(where)}</button></dd>` : ''}
+    </dl>
+    ${notes.map(([k, t]) => `<p class="ghp-note ${k}">${k === 'ok' ? CHECK : ''}<span>${esc(t)}</span></p>`).join('')}
+    ${button ? `<div class="ghp-actions">${button}</div>` : ''}
+  </article>`;
+  paintProgress();
+  if (!S.icons.has(a.id) && !S.iconWait.has(a.id)) {
+    S.iconWait.add(a.id);
+    loadIcons([a.id]);
+  }
+}
+
+$('gh-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  ghLookup();
+});
+// a click on the dimmed backdrop (outside the sheet) closes it, unless an install is running
+$('gh').addEventListener('click', (e) => {
+  if (e.target === $('gh') && !GH.looking && !(GH.preview && S.busy.has(GH.preview.addon.id))) $('gh').close();
+});
+$('gh').addEventListener('cancel', (e) => {
+  if (GH.preview && S.busy.has(GH.preview.addon.id)) e.preventDefault();
+});
 
 listen('progress', (e) => {
   const p = e.payload;

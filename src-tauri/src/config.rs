@@ -123,6 +123,10 @@ pub struct Config {
     /// was for an install from before this setting, and never again after that, so a player who turns it off keeps it off
     #[serde(default)]
     pub autostart_decided: bool,
+    /// GitHub repos ("owner/repo") the player installed an addon from by its link; checked for updates like the
+    /// catalog (see github.rs)
+    #[serde(default)]
+    pub github_repos: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -147,7 +151,7 @@ pub fn clamp_hours(h: f64) -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new() }
     }
 }
 

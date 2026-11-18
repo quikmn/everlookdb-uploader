@@ -734,6 +734,93 @@ button { cursor: pointer; }
   font-size: 12px;
 }
 
+/* Install from GitHub: the toolbar button on Get addons, the badge, and the sheet */
+
+.tool.solo { border-radius: var(--r-m); }
+.tool.solo svg { stroke-width: 1.6; }
+.ours.gh { color: var(--ink-2); }
+
+.sheet {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  padding: 22px 24px 24px;
+  border: 1px solid var(--line-2);
+  border-top: 2px solid var(--sky);
+  border-radius: var(--r-m);
+  background: var(--raise);
+  color: var(--ink);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+.sheet[open] { animation: drop 0.18s ease-out; }
+.sheet::backdrop { background: rgba(5, 9, 16, 0.62); }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sheet-head h2 { margin: 0; font-family: var(--display); font-size: 20px; font-weight: 600; }
+.sheet-close {
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border: 0; border-radius: var(--r-s);
+  background: none; color: var(--ink-3);
+}
+.sheet-close:hover { background: var(--raise-2); color: var(--ink); }
+.sheet-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+.sheet-lede { margin: 6px 0 16px; color: var(--ink-2); font-size: 13px; max-width: 60ch; }
+
+.gh-form { display: flex; gap: 8px; }
+.gh-form input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-s);
+  background: var(--night);
+  color: var(--ink);
+  font-size: 13px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.gh-form input::placeholder { color: var(--ink-3); }
+.gh-form input:focus { outline: none; border-color: var(--sky); box-shadow: 0 0 0 3px rgba(143, 199, 255, 0.15); }
+.gh-form .btn { height: 36px; padding: 0 16px; }
+.gh-form .btn[aria-busy] { min-width: 112px; }
+.gh-error { margin: 10px 0 0; color: var(--bad); font-size: 13px; user-select: text; -webkit-user-select: text; }
+
+.ghp {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  animation: drop 0.18s ease-out;
+}
+.ghp-head { display: flex; align-items: center; gap: 12px; }
+.ghp-title h3 { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; }
+.ghp-title p { margin: 1px 0 0; color: var(--ink-3); font-size: 13px; }
+.ghp-title .author { color: var(--ink-2); }
+.ghp-sum { margin: 0; color: var(--ink-2); font-size: 13px; }
+.ghp-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 5px 16px;
+  font-size: 13px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--night);
+}
+.ghp-facts dt { color: var(--ink-3); }
+.ghp-facts dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.ghp-facts .soft { color: var(--ink-3); margin-left: 10px; }
+.ghp-facts .link-button { white-space: normal; text-align: left; }
+.ghp-note { margin: 0; display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--ink-2); }
+.ghp-note svg { flex: none; width: 14px; height: 14px; margin-top: 2px; fill: none; stroke: var(--ok); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ghp-note.warn { color: var(--warn); }
+.ghp-note.bad { color: var(--bad); }
+.ghp-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ghp-actions .btn { padding: 8px 18px; }
+
 @media (max-width: 900px) {
   .app { grid-template-columns: 220px 1fr; }
   .hero, .toolbar, .list, .status { padding-left: 22px; padding-right: 22px; }

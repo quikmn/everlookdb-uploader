@@ -119,6 +119,10 @@
           <button type="button" role="menuitem" data-act="save-list">Save as text file…</button>
         </div>
       </div>
+      <button class="tool solo" type="button" data-act="gh-open" id="gh-open" hidden title="Install an addon from its GitHub page, by its link">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 9.5l3-3"/><path d="M7.5 4.5l1-1a2.8 2.8 0 0 1 4 4l-1 1"/><path d="M8.5 11.5l-1 1a2.8 2.8 0 0 1-4-4l1-1"/></svg>
+        Install from GitHub
+      </button>
     </div>
 
     <div class="notice bad upload-alert" id="upload-alert" role="alert" hidden></div>
@@ -130,5 +134,22 @@
     <footer class="status" id="status"></footer>
   </main>
 </div>
+
+<!-- Install from GitHub: a link, a look at what it is, then one button to install it -->
+<dialog class="sheet" id="gh" aria-labelledby="gh-title">
+  <header class="sheet-head">
+    <h2 id="gh-title">Install from GitHub</h2>
+    <button class="sheet-close" type="button" data-act="gh-close" aria-label="Close">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </header>
+  <p class="sheet-lede">Paste the link of an addon’s GitHub page. EverlookDB installs its newest release and keeps it updated, like the addons in its list.</p>
+  <form class="gh-form" id="gh-form" autocomplete="off">
+    <input type="text" id="gh-link" placeholder="https://github.com/owner/addon" spellcheck="false" aria-label="GitHub link" aria-describedby="gh-error">
+    <button class="btn solid" type="submit" id="gh-look">Look up</button>
+  </form>
+  <p class="gh-error" id="gh-error" role="alert" hidden></p>
+  <div class="gh-preview" id="gh-preview" aria-live="polite"></div>
+</dialog>
 </body>
 </html>

@@ -10,7 +10,8 @@ A small, ad-free addon manager for World of Warcraft (Windows and macOS), and th
   its version and whether an update is waiting.
 - **Finds new ones.** Instant search over every addon in the EverlookDB catalog (GitHub releases and Tukui:
   BigWigs, DBM, WeakAuras, ElvUI, Questie, Bartender4 …), filtered to the game you have selected. Forgiving:
-  "dbm", "big wigs", "questy" all find what you meant.
+  "dbm", "big wigs", "questy" all find what you meant. An addon that isn't in the list installs from its GitHub
+  link (Install from GitHub), shown before it installs and then updated like the others.
 - **Keeps them updated.** One click to install, update, go back to the previous version or remove. Every hour (or
   as often as you set, up to once a week) it updates what it installed by itself (one switch turns that off), and tells you what changed (v427.8 → v427.9).
 - **Uploads EverlookDB data**, exactly as the EverlookDB Uploader did: see below.
@@ -44,7 +45,8 @@ the app where it is, so it keeps its old name in Applications (`EverlookDB Uploa
 
 **The addon catalog request sends nothing about you.** The app asks
 `https://everlookdb.com/api/v1/addons/catalog` for the list with only its name and version as the user agent and
-the ETag of the copy it already has: no ids, no cookies, no list of your addons or games. Addon downloads go straight
+the ETag of the copy it already has: no ids, no cookies, no list of your addons or games. An addon added by its GitHub
+link is looked up the same way (`/api/v1/addons/github/{owner}/{repo}`), so the app never calls GitHub's API itself. Addon downloads go straight
 to GitHub or Tukui, never through everlookdb.com.
 
 **Uploads send only the game facts in EverlookDB.lua and EverlookDBAuctions.lua.** WoW addons can't use the network.

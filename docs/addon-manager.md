@@ -68,6 +68,24 @@ If-None-Match):
   WowUp). May be empty if unknown.
 - `ours`: true for EverlookDB's own addons.
 
+## Install from GitHub
+
+`GET https://everlookdb.com/api/v1/addons/github/{owner}/{repo}` returns one addon in the catalog contract's shape,
+built by the same server code from the repo's newest release (no drafts or pre-releases), cached 10 minutes per repo
+(2 minutes for "not found" and "nothing to install"). When the catalog lists the repo, it is the catalog's entry. The
+difference from the catalog: a zip whose game versions can't be told (no release.json interface numbers and none in
+its .toc files) is kept with `"flavors": []`, and the app lets the player install it anyway, saying so. Errors are
+`{"error": {"message": "..."}}` with a sentence for the player: 400 not a GitHub repo name, 404 no such repo or no
+releases, 422 no addon zip or only for game versions the catalog has no flavor for, 502/503 GitHub busy (not cached).
+
+The app accepts `https://github.com/owner/repo` and its pages (`/releases`, `/tree/main/...`), without https or with
+www., a trailing `.git`, `git@github.com:owner/repo.git` and plain `owner/repo` (src-tauri/src/github.rs). It shows
+the addon before installing; the repos the player installed from are kept in config.json (`github_repos`) with their
+newest answers in github-addons.json, asked for again on every catalog refresh and added to the catalog as
+`"custom": true` entries, so updates, rollback and remove work as for catalog addons. Only zips under
+`https://github.com/<owner>/<repo>/releases/download/` are installed from them. Removing the addon from its last
+install forgets the repo.
+
 ## App: install detection
 
 For each `World of Warcraft` folder found (Battle.net registry/config, common folders, folders the user adds),
