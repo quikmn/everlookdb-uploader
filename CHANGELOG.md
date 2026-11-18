@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 (2026-11-18)
 
 - Right-click an addon for its own menu: in My addons Update, Open folder, its project page, Copy name and
   Uninstall; in Get addons Install (or Update), its project page and Copy name. Uninstall now works for every addon,
