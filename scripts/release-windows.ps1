@@ -67,8 +67,13 @@ if (-not $LatestOnly) {
   Write-Host "Built and signed $WinAsset" -ForegroundColor Green
 
   if (-not $NoUpload) {
+    # "release not found" on stderr must not stop the script (ErrorActionPreference Stop turns it into an error in
+    # Windows PowerShell): the Mac job may not have created the release yet, and then we create it here
+    $ErrorActionPreference = 'Continue'
     gh release view $Tag -R $Repo *> $null
-    if ($LASTEXITCODE -ne 0) { gh release create $Tag -R $Repo --draft --title "EverlookDB $Version" --notes "EverlookDB $Version" }
+    $found = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = 'Stop'
+    if (-not $found) { gh release create $Tag -R $Repo --draft --title "EverlookDB $Version" --notes "EverlookDB $Version" }
     # fixed name too: everlookdb.com links to releases/latest/download/EverlookDB-Uploader-windows.exe
     Copy-Item (Join-Path $Dist $WinAsset) (Join-Path $Dist 'EverlookDB-Uploader-windows.exe') -Force
     gh release upload $Tag -R $Repo (Join-Path $Dist $WinAsset) (Join-Path $Dist "$WinAsset.sig") (Join-Path $Dist 'EverlookDB-Uploader-windows.exe') --clobber
