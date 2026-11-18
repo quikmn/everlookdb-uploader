@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.1 (2026-11-19)
 
 - "Update addons by itself" now updates every addon EverlookDB knows, also ones you or another app installed (Bartender4, Questie...), not only the ones EverlookDB installed. The old copy is kept in the backups folder first. Developer checkouts (a folder with .git) and addons without a real version are left alone.
 - Update all is always at the top of My addons: one click checks every addon for a new version and updates all that have one. It also says how many updates are waiting, or that everything is up to date.
