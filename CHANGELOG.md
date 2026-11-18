@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A new install now starts with Windows (opens at login on a Mac) by default, so your uploads and addon updates keep going without you opening the app. Turn it off in the window or the tray menu and it stays off. Installs from before this keep the setting they had.
 - Ready for the upcoming EverlookDB giveaway: the app keeps the receipt the site gives for each accepted upload,
   and will show your giveaway code under Uploads with a Copy button and a checklist of what is still missing (a full
   auction house scan, collector data). It stays hidden until the giveaway starts.

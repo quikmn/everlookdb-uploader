@@ -119,6 +119,10 @@ pub struct Config {
     /// the server's receipts for the giveaway code
     #[serde(default)]
     pub receipts: Receipts,
+    /// set once the first start has decided "start with Windows / open at login": on for a new install, left as it
+    /// was for an install from before this setting, and never again after that, so a player who turns it off keeps it off
+    #[serde(default)]
+    pub autostart_decided: bool,
 }
 
 fn yes() -> bool {
@@ -143,12 +147,12 @@ pub fn clamp_hours(h: f64) -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default() }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false }
     }
 }
 
 impl Config {
-    fn path() -> PathBuf {
+    pub(crate) fn path() -> PathBuf {
         dir().join("config.json")
     }
 
@@ -197,6 +201,19 @@ pub fn log(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autostart_is_decided_once() {
+        // a settings file from before the setting: not decided yet, so the first start decides (and leaves an existing
+        // install's choice alone, see main.rs run)
+        let old: Config = serde_json::from_str(r#"{"paused":false}"#).unwrap();
+        assert!(!old.autostart_decided);
+        // once decided, it stays decided: a player who turned it off is never switched back on
+        let mut c = Config::default();
+        c.autostart_decided = true;
+        let back: Config = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+        assert!(back.autostart_decided);
+    }
 
     #[test]
     fn update_hours_are_clamped() {

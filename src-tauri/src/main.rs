@@ -224,8 +224,17 @@ impl Ui {
     }
 }
 
+/// A new install starts with Windows / at login (see Config::autostart_decided); set in run, used in setup.
+static AUTOSTART_NEW_INSTALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn run(args: Args) {
+    // no settings file yet: this is a new install
+    let fresh = !Config::path().exists();
     let mut cfg = Config::load();
+    if !cfg.autostart_decided {
+        cfg.autostart_decided = true;
+        AUTOSTART_NEW_INSTALL.store(fresh, std::sync::atomic::Ordering::Relaxed);
+    }
     if let Some(over) = args.wow.as_deref().and_then(wow::resolve) {
         cfg.wow_dir = Some(over);
     }
@@ -307,8 +316,13 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
     // real app, never a development or test run, which would take over the player's login item
     if !cfg!(debug_assertions) && std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_none_or(|v| v.is_empty()) {
         let al = app.autolaunch();
-        if al.is_enabled().unwrap_or(false) {
+        // a new install starts with Windows / at login by default (the player can turn it off in the window or the
+        // tray menu, and it then stays off); otherwise only re-point an existing login item at this copy
+        if AUTOSTART_NEW_INSTALL.load(std::sync::atomic::Ordering::Relaxed) || al.is_enabled().unwrap_or(false) {
             let _ = al.enable();
+            if AUTOSTART_NEW_INSTALL.load(std::sync::atomic::Ordering::Relaxed) {
+                config::log("new install: start with Windows / at login turned on (the player can turn it off)");
+            }
         }
     }
     let status = MenuItem::with_id(app, "status", "Starting…", false, None::<&str>)?;
