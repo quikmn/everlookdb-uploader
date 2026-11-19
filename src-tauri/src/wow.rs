@@ -362,6 +362,75 @@ pub fn all_installs(extra: &[PathBuf]) -> Vec<Install> {
     all
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Is the game running?
+
+/// Whether `exe` is a game executable in the flavor folder `dir` (Wow.exe, WowClassic.exe ... or the macOS app).
+pub fn runs_from(exe: &Path, dir: &Path) -> bool {
+    let key = |p: &Path| p.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
+    let (e, d) = (key(exe), key(dir));
+    let Some(rest) = e.strip_prefix(&d).and_then(|r| r.strip_prefix('/')) else { return false };
+    let first = rest.split('/').next().unwrap_or("");
+    (first.starts_with("wow") && first.ends_with(".exe") && !rest.contains('/')) || (first.starts_with("world of warcraft") && first.ends_with(".app"))
+}
+
+/// The paths of the running game executables (only processes whose name starts with "wow" or "World of Warcraft").
+#[cfg(windows)]
+pub fn running_games() -> Vec<PathBuf> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    let mut out = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE || snap.is_null() {
+            return out;
+        }
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            let len = e.szExeFile.iter().position(|c| *c == 0).unwrap_or(e.szExeFile.len());
+            let name = String::from_utf16_lossy(&e.szExeFile[..len]).to_ascii_lowercase();
+            if name.starts_with("wow") && name.ends_with(".exe") {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, e.th32ProcessID);
+                if !h.is_null() {
+                    let mut buf = [0u16; 1024];
+                    let mut n = buf.len() as u32;
+                    if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut n) != 0 {
+                        out.push(PathBuf::from(String::from_utf16_lossy(&buf[..n as usize])));
+                    }
+                    CloseHandle(h);
+                }
+            }
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn running_games() -> Vec<PathBuf> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axo", "comm="]).output() else { return Vec::new() };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("World of Warcraft"))
+        .map(|l| {
+            // ".../_retail_/World of Warcraft.app/Contents/MacOS/World of Warcraft" -> the .app
+            let l = l.trim();
+            match l.find(".app/") {
+                Some(i) => PathBuf::from(&l[..i + 4]),
+                None => PathBuf::from(l),
+            }
+        })
+        .collect()
+}
+
+/// Whether the game of this install is running now.
+pub fn game_running(install: &Install) -> bool {
+    running_games().iter().any(|exe| runs_from(exe, &install.dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +469,20 @@ mod tests {
         assert_eq!(edition("_retail_", "12.0.5"), Some("Midnight".into()));
         assert_eq!(edition("_classic_era_", "1.15.8"), None);
         assert_eq!(edition("_forever_", "1.60.1"), None);
+    }
+
+    #[test]
+    fn tells_which_game_runs() {
+        let dir = Path::new(r"D:\Games\World of Warcraft\_forever_");
+        assert!(runs_from(Path::new(r"D:\Games\World of Warcraft\_forever_\Wow.exe"), dir));
+        assert!(runs_from(Path::new(r"d:\games\world of warcraft\_FOREVER_\WowClassic.exe"), dir));
+        assert!(!runs_from(Path::new(r"D:\Games\World of Warcraft\_retail_\Wow.exe"), dir));
+        assert!(!runs_from(Path::new(r"D:\Games\World of Warcraft\_forever_2\Wow.exe"), dir));
+        assert!(!runs_from(Path::new(r"D:\Games\World of Warcraft\_forever_\Tools\Wow.exe"), dir));
+        assert!(!runs_from(Path::new(r"D:\Games\World of Warcraft\_forever_\Battle.net.exe"), dir));
+        assert!(runs_from(Path::new("/Applications/World of Warcraft/_retail_/World of Warcraft.app"), Path::new("/Applications/World of Warcraft/_retail_/")));
+        // whatever runs here, asking never fails
+        let _ = running_games();
     }
 
     #[test]

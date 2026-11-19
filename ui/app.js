@@ -644,7 +644,8 @@ function autoLine() {
   const a = S.auto;
   const parts = [];
   if (a) {
-    const did = a.off ? 'checked only (updating by itself is off)' : a.failed ? `${a.updated} updated, ${a.failed} failed` : a.updated ? `updated ${plural(a.updated, 'addon', 'addons')}` : 'nothing to update';
+    let did = a.off ? 'checked only (updating by itself is off)' : a.failed ? `${a.updated} updated, ${a.failed} failed` : a.updated ? `updated ${plural(a.updated, 'addon', 'addons')}` : a.waiting ? '' : 'nothing to update';
+    if (!a.off && a.waiting) did = [did, `${plural(a.waiting, 'update waits', 'updates wait')} until WoW is closed`].filter(Boolean).join(', ');
     parts.push(`Auto check ran ${when(a.at)}: ${did}`);
   }
   if (S.next) parts.push(`next ${when(S.next)}`);
@@ -671,6 +672,15 @@ function renderStatus(text) {
 
 // ------------------------------------------------------------------------------------------------ notices
 
+// where a changed addon takes effect: a /reload when the game is running, else the next start
+function reloadLine(changes) {
+  if (!changes.length) return '';
+  const n = changes.length;
+  return changes.some((c) => c.running)
+    ? `<p class="where">WoW is running: type /reload in the game to load ${n === 1 ? 'it' : 'them'}.</p>`
+    : `<p class="where">${n === 1 ? 'It loads' : 'They load'} the next time you start WoW (or type /reload if it’s open).</p>`;
+}
+
 function showChanges(title, changes, failed = []) {
   const n = $('notice');
   n.className = 'notice' + (failed.length && !changes.length ? ' bad' : '');
@@ -684,6 +694,7 @@ function showChanges(title, changes, failed = []) {
           }</li>`
       )
       .join('')}${failed.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>
+    ${reloadLine(changes)}
     <button class="link-button close" type="button" data-act="dismiss">Dismiss</button>`;
   n.hidden = false;
 }

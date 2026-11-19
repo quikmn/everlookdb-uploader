@@ -142,6 +142,9 @@ pub struct Change {
     pub name: String,
     pub from: Option<String>,
     pub to: String,
+    /// the game was running when it changed: a /reload loads it
+    #[serde(default)]
+    pub running: bool,
 }
 
 /// "bundle/v12.9.0+v1.1.1" -> "12.9.0": no tag prefix before '/', no leading v, no build metadata after '+'.
@@ -720,7 +723,7 @@ pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress:
     records.installs.entry(install.id.clone()).or_default().insert(addon.id.clone(), rec);
     records.save()?;
     config::log(&format!("installed {} {} into {}", addon.id, addon.version, install.id));
-    Ok(Change { install: install.name.clone(), name: addon.name.clone(), from: old.map(|r| r.version), to: addon.version.clone() })
+    Ok(Change { install: install.name.clone(), name: addon.name.clone(), from: old.map(|r| r.version), to: addon.version.clone(), running: crate::wow::game_running(install) })
 }
 
 fn sanitize(s: &str) -> String {
@@ -757,7 +760,7 @@ pub fn rollback(install: &Install, id: &str) -> Result<Change, String> {
     records.installs.entry(install.id.clone()).or_default().insert(id.to_string(), new);
     records.save()?;
     config::log(&format!("rolled back {id} to {} in {}", prev.version, install.id));
-    Ok(Change { install: install.name.clone(), name: rec.name, from: Some(rec.version), to: prev.version })
+    Ok(Change { install: install.name.clone(), name: rec.name, from: Some(rec.version), to: prev.version, running: crate::wow::game_running(install) })
 }
 
 /// What uninstalling one listed addon does: the folders that go to the Recycle Bin, and the ones that stay because
@@ -1018,15 +1021,9 @@ mod tests {
         let (d, mut install) = test_install(
             "adopt",
             &[
-                ("Forever", "## Title: Forever
-## Version: 1.2-forever
-"),
-                ("Plain", "## Title: Plain
-## Version: 1.2
-"),
-                ("Ahead", "## Title: Ahead
-## Version: 2.0
-"),
+                ("Forever", "## Title: Forever\n## Version: 1.2-forever\n"),
+                ("Plain", "## Title: Plain\n## Version: 1.2\n"),
+                ("Ahead", "## Title: Ahead\n## Version: 2.0\n"),
             ],
         );
         install.game = true;

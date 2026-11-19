@@ -235,6 +235,9 @@ struct AutoRun {
     off: bool,
     updated: usize,
     failed: usize,
+    /// updates waiting because the game is running (they go in once it is closed)
+    #[serde(default)]
+    waiting: usize,
 }
 
 fn now_rfc3339() -> String {
@@ -1163,19 +1166,43 @@ fn open_addons_folder(app: AppHandle, ui: State<Ui>, install: String) -> Result<
 /// restart.
 fn spawn_hourly(app: AppHandle) {
     std::thread::spawn(move || {
-        let started = Instant::now();
-        let mut last: Option<Instant> = None;
+        // the wall clock, so a PC that slept through the hour checks when it wakes
+        let started = chrono::Local::now();
+        let mut last: Option<chrono::DateTime<chrono::Local>> = None;
         let mut first = true;
+        // installs whose updates wait for the game to close, and when to look again
+        let mut waiting: Vec<String> = Vec::new();
+        let mut look_again = started;
         loop {
             let hours = app.state::<Ui>().shared.cfg.lock().unwrap().hours();
+            let now = chrono::Local::now();
+            // the clock was set back: count from now
+            if last.is_some_and(|t| t > now + chrono::Duration::minutes(1)) {
+                last = Some(now);
+            }
             let due = match last {
-                None => started + Duration::from_secs(5),
-                Some(t) => t + Duration::from_secs(u64::from(hours) * 3600),
+                None => started + chrono::Duration::seconds(5),
+                Some(t) => t + chrono::Duration::hours(i64::from(hours)),
             };
-            let now = Instant::now();
             if now < due {
+                if !waiting.is_empty() && now >= look_again {
+                    look_again = now + chrono::Duration::minutes(5);
+                    let ui = app.state::<Ui>();
+                    let auto = ui.shared.cfg.lock().unwrap().auto_update;
+                    if let (true, Some(cat)) = (auto, ui.catalog()) {
+                        let targets: Vec<wow::Install> = installs(&ui).into_iter().filter(|i| waiting.contains(&i.id)).collect();
+                        let (out, still) = auto_update(&app, &targets, &cat);
+                        waiting = still;
+                        if !out.changes.is_empty() || !out.failed.is_empty() {
+                            note_auto(&app, false, &out, &waiting, &cat);
+                        }
+                    } else {
+                        waiting.clear();
+                    }
+                }
                 // look at the setting again now and then, so a new interval takes effect
-                std::thread::sleep((due - now).min(Duration::from_secs(15)));
+                let left = (due - now).to_std().unwrap_or_default();
+                std::thread::sleep(left.min(Duration::from_secs(15)));
                 continue;
             }
             last = Some(now);
@@ -1186,25 +1213,45 @@ fn spawn_hourly(app: AppHandle) {
             refresh_catalog(&ui, first.then(|| Duration::from_secs(60)));
             let _ = app.emit("catalog", ());
             first = false;
-            let note = |off: bool, updated: usize, failed: usize| {
-                ui.catalog.lock().unwrap().auto = Some(AutoRun { at: now_rfc3339(), off, updated, failed });
-                let _ = app.emit("catalog", ());
-            };
+            let Some(cat) = ui.catalog() else { continue };
             if !ui.shared.cfg.lock().unwrap().auto_update {
-                note(true, 0, 0);
+                waiting.clear();
+                note_auto(&app, true, &Updated { changes: Vec::new(), failed: Vec::new() }, &waiting, &cat);
                 continue;
             }
-            let Some(cat) = ui.catalog() else { continue };
-            let out = update_installs(&app, &installs(&ui), &cat);
-            note(false, out.changes.len(), out.failed.len());
-            for f in &out.failed {
-                config::log(&format!("auto-update failed: {f}"));
-            }
-            if !out.changes.is_empty() || !out.failed.is_empty() {
-                let _ = app.emit("updated", out);
-            }
+            let (out, still) = auto_update(&app, &installs(&ui), &cat);
+            waiting = still;
+            look_again = chrono::Local::now() + chrono::Duration::minutes(5);
+            note_auto(&app, false, &out, &waiting, &cat);
         }
     });
+}
+
+/// The automatic update of `targets`, except installs whose game is running (replacing an addon's files under a
+/// running game can mix two versions): those are returned, to be tried again once the game is closed.
+fn auto_update(app: &AppHandle, targets: &[wow::Install], cat: &Catalog) -> (Updated, Vec<String>) {
+    let (running, free): (Vec<wow::Install>, Vec<wow::Install>) = targets.iter().cloned().partition(|i| wow::game_running(i));
+    let waiting: Vec<String> = running.iter().filter(|i| !manager::pending(i, cat).is_empty()).map(|i| i.id.clone()).collect();
+    for i in &running {
+        if waiting.contains(&i.id) {
+            config::log(&format!("auto-update: {} is running; its updates wait until it is closed", i.name));
+        }
+    }
+    (update_installs(app, &free, cat), waiting)
+}
+
+/// Remember what the automatic check did (the window's footer), and tell the window what changed.
+fn note_auto(app: &AppHandle, off: bool, out: &Updated, waiting: &[String], cat: &Catalog) {
+    let ui = app.state::<Ui>();
+    let waiting_n: usize = installs(&ui).iter().filter(|i| waiting.contains(&i.id)).map(|i| manager::pending(i, cat).len()).sum();
+    ui.catalog.lock().unwrap().auto = Some(AutoRun { at: now_rfc3339(), off, updated: out.changes.len(), failed: out.failed.len(), waiting: waiting_n });
+    let _ = app.emit("catalog", ());
+    for f in &out.failed {
+        config::log(&format!("auto-update failed: {f}"));
+    }
+    if !out.changes.is_empty() || !out.failed.is_empty() {
+        let _ = app.emit("updated", out.clone());
+    }
 }
 
 /// Check for a new version of the app a minute after start and then every hour; install it silently and restart.
