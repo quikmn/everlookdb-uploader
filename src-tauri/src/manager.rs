@@ -448,18 +448,53 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 /// A staging folder next to AddOns (same drive, so swapping is a rename; outside AddOns, so the game never sees it).
 fn staging_for(addons_dir: &Path) -> Result<PathBuf, String> {
     let parent = addons_dir.parent().ok_or("no Interface folder")?;
-    let dir = parent.join(format!(".everlookdb-staging-{}-{}", std::process::id(), stamp()));
+    let dir = parent.join(format!("{STAGING_PREFIX}{}-{}", std::process::id(), stamp()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("can't write to {}: {e}", parent.display()))?;
     Ok(dir)
 }
 
+/// What a swap has done so far, kept in the staging folder (journal.json) so a swap cut short (a crash, a power cut,
+/// an undo that failed) can be put right the next time: see `recover`.
+#[derive(Serialize, Deserialize, Default, Debug)]
+struct Journal {
+    /// folders moved from AddOns into staging/old (the version being replaced)
+    moved: Vec<String>,
+    /// folders of the new version put into AddOns
+    placed: Vec<String>,
+    /// every new folder is in place: the old copies may go
+    done: bool,
+    /// where the replaced folders are copied before they go (taking over another app's addon)
+    #[serde(default)]
+    backup: Option<PathBuf>,
+}
+
+const JOURNAL: &str = "journal.json";
+const STAGING_PREFIX: &str = ".everlookdb-staging-";
+
+fn write_journal(staging: &Path, j: &Journal) -> std::io::Result<()> {
+    let tmp = staging.join("journal.json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(j).unwrap_or_default())?;
+    std::fs::rename(&tmp, staging.join(JOURNAL))
+}
+
+/// Moves a folder (a rename; injectable so tests can make it fail).
+type Mover<'a> = &'a mut dyn FnMut(&Path, &Path) -> std::io::Result<()>;
+
 /// Unpack `zip` and swap its folders into `addons_dir`. `allowed` are the existing folders we may replace (ours, or
-/// the ones the player asked us to take over). Returns the new folders and the replaced ones (moved to `old`).
+/// the ones the player asked us to take over). Returns the new folders. The old folders are deleted only once every
+/// new one is in place; when anything fails they are put back, and when even that fails they stay in the staging
+/// folder, which `recover` puts right (at the next install, and when the app starts).
 fn install_zip(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, backup_to: Option<&Path>) -> Result<Vec<String>, String> {
+    install_zip_with(addons_dir, zip, allowed, backup_to, &mut |a: &Path, b: &Path| std::fs::rename(a, b))
+}
+
+fn install_zip_with(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, backup_to: Option<&Path>, mv: Mover) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(addons_dir).map_err(|e| format!("can't create {}: {e}", addons_dir.display()))?;
+    // anything an earlier swap left half done is put right first
+    recover(addons_dir);
     let staging = staging_for(addons_dir)?;
-    let result = (|| {
-        let unpack = staging.join("new");
+    let unpack = staging.join("new");
+    let prepared = (|| {
         let tops = unzip(zip, &unpack)?;
         let (root, folders) = addon_root(&unpack, &tops)?;
         for f in &folders {
@@ -467,45 +502,167 @@ fn install_zip(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, backup_
                 return Err(format!("{f} is already in AddOns and EverlookDB didn't install it; not touched"));
             }
         }
-        // move the old folders aside: the ones being replaced and the ones the old version had that the new one drops
         let old = staging.join("old");
         std::fs::create_dir_all(&old).map_err(|e| e.to_string())?;
-        let mut moved: Vec<String> = Vec::new();
-        for f in allowed {
-            let p = addons_dir.join(f);
-            if p.exists() {
-                if let Err(e) = std::fs::rename(&p, old.join(f)) {
-                    restore(addons_dir, &old, &moved);
-                    return Err(format!("can't move {f} (is the game running?): {e}"));
-                }
-                moved.push(f.clone());
-            }
-        }
-        let mut placed: Vec<String> = Vec::new();
-        for f in &folders {
-            if let Err(e) = std::fs::rename(root.join(f), addons_dir.join(f)) {
-                for p in &placed {
-                    let _ = std::fs::remove_dir_all(addons_dir.join(p));
-                }
-                restore(addons_dir, &old, &moved);
-                return Err(format!("can't place {f}: {e}"));
-            }
-            placed.push(f.clone());
-        }
-        if let Some(dest) = backup_to {
-            for f in &moved {
-                let _ = copy_dir(&old.join(f), &dest.join(f));
-            }
-        }
-        Ok(folders)
+        Ok((root, folders, old))
     })();
-    let _ = std::fs::remove_dir_all(&staging);
-    result
+    let (root, folders, old) = match prepared {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    let mut j = Journal { backup: backup_to.map(Path::to_path_buf), ..Default::default() };
+    if let Err(e) = write_journal(&staging, &j) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("can't write next to AddOns: {e}"));
+    }
+    // move the old folders aside: the ones being replaced and the ones the old version had that the new one drops
+    let mut aside: Vec<&String> = allowed.iter().collect();
+    aside.sort();
+    for f in aside {
+        let p = addons_dir.join(f);
+        if p.exists() {
+            if let Err(e) = mv(&p, &old.join(f)) {
+                return Err(undo(addons_dir, &staging, &root, &mut j, mv, format!("can't move {f} (is the game running?): {e}")));
+            }
+            j.moved.push(f.clone());
+            let _ = write_journal(&staging, &j);
+        }
+    }
+    for f in &folders {
+        if let Err(e) = mv(&root.join(f), &addons_dir.join(f)) {
+            return Err(undo(addons_dir, &staging, &root, &mut j, mv, format!("can't place {f}: {e}")));
+        }
+        j.placed.push(f.clone());
+        let _ = write_journal(&staging, &j);
+    }
+    j.done = true;
+    let _ = write_journal(&staging, &j);
+    finish(&staging, &j);
+    Ok(folders)
 }
 
-fn restore(addons_dir: &Path, old: &Path, moved: &[String]) {
-    for f in moved {
-        let _ = std::fs::rename(old.join(f), addons_dir.join(f));
+/// Put things back as they were after a failed swap: the new folders out of AddOns, the old ones back in. Returns
+/// the error to show. When something can't be put back, the staging folder stays (with its journal) for `recover`.
+fn undo(addons_dir: &Path, staging: &Path, root: &Path, j: &mut Journal, mv: Mover, cause: String) -> String {
+    let old = staging.join("old");
+    while let Some(p) = j.placed.pop() {
+        if let Err(e) = mv(&addons_dir.join(&p), &root.join(&p)) {
+            config::log(&format!("undo: can't take the new {p} out of AddOns: {e}"));
+            j.placed.push(p);
+            break;
+        }
+        let _ = write_journal(staging, j);
+    }
+    if j.placed.is_empty() {
+        let mut left = Vec::new();
+        for m in std::mem::take(&mut j.moved) {
+            if let Err(e) = mv(&old.join(&m), &addons_dir.join(&m)) {
+                config::log(&format!("undo: can't put {m} back: {e}"));
+                left.push(m);
+            }
+        }
+        j.moved = left;
+    }
+    let _ = write_journal(staging, j);
+    if j.moved.is_empty() && j.placed.is_empty() {
+        let _ = std::fs::remove_dir_all(staging);
+        return cause;
+    }
+    config::log(&format!("undo left {} for later: placed {:?}, moved {:?}", staging.display(), j.placed, j.moved));
+    format!(
+        "{cause}. The earlier copy of {} is kept safe in {} and EverlookDB puts it back the next time it starts",
+        j.moved.join(", "),
+        staging.display()
+    )
+}
+
+/// After a swap in which every new folder is in place: copy the replaced folders to the backup (when taking over),
+/// then delete the staging folder. If the backup can't be made, the staging folder stays and `recover` tries again.
+fn finish(staging: &Path, j: &Journal) {
+    let old = staging.join("old");
+    if let Some(dest) = &j.backup {
+        for f in &j.moved {
+            if !old.join(f).exists() {
+                continue;
+            }
+            if let Err(e) = copy_dir(&old.join(f), &dest.join(f)) {
+                config::log(&format!("backup of {f} to {} failed ({e}); kept in {}", dest.display(), staging.display()));
+                return;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(staging);
+}
+
+/// Put right whatever a swap left in staging folders next to `addons_dir` (see `Journal`): a swap that finished has
+/// its old copies deleted (after the backup, when there is one); one that didn't is undone, the new folders out and
+/// the old ones back. An old copy is never deleted unless the new one is fully in place: when that can't be told (a
+/// staging folder from before journals), an old folder whose place in AddOns is taken goes to the backups folder.
+pub fn recover(addons_dir: &Path) {
+    recover_in(addons_dir, &config::dir().join("backups"));
+}
+
+/// `recover`, at app start: under the install lock.
+pub fn recover_leftovers(addons_dir: &Path) {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    recover(addons_dir);
+}
+
+fn recover_in(addons_dir: &Path, backups: &Path) {
+    let Some(parent) = addons_dir.parent() else { return };
+    let Ok(rd) = std::fs::read_dir(parent) else { return };
+    for e in rd.flatten() {
+        if e.file_name().to_string_lossy().starts_with(STAGING_PREFIX) && e.path().is_dir() {
+            recover_one(addons_dir, &e.path(), backups);
+        }
+    }
+}
+
+fn recover_one(addons_dir: &Path, staging: &Path, backups: &Path) {
+    let old = staging.join("old");
+    let journal: Option<Journal> = std::fs::read(staging.join(JOURNAL)).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    match journal {
+        Some(j) if j.done => {
+            config::log(&format!("recover: finishing {}", staging.display()));
+            finish(staging, &j);
+            return;
+        }
+        Some(j) => {
+            config::log(&format!("recover: undoing {} (placed {:?}, moved {:?})", staging.display(), j.placed, j.moved));
+            for p in &j.placed {
+                // the new copy is taken out only when the old one is there to go back (or there was none)
+                if old.join(p).exists() || !j.moved.contains(p) {
+                    if let Err(e) = std::fs::remove_dir_all(addons_dir.join(p)) {
+                        config::log(&format!("recover: can't take out the new {p}: {e}"));
+                    }
+                }
+            }
+        }
+        None => config::log(&format!("recover: {} has no journal; putting back what is missing", staging.display())),
+    }
+    let olds: Vec<String> = std::fs::read_dir(&old).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+    let mut left = false;
+    for f in olds {
+        let here = addons_dir.join(&f);
+        let from = old.join(&f);
+        let r = if here.exists() {
+            // its place is taken by a copy that can't be told complete: kept in the backups folder, never deleted
+            let dest = backups.join(format!("{}-recovered-{}", sanitize(&f), stamp())).join(&f);
+            std::fs::create_dir_all(dest.parent().unwrap_or(backups))
+                .and_then(|_| std::fs::rename(&from, &dest).or_else(|_| copy_dir(&from, &dest).and_then(|_| std::fs::remove_dir_all(&from))))
+        } else {
+            std::fs::rename(&from, &here)
+        };
+        if let Err(e) = r {
+            config::log(&format!("recover: can't put {f} back from {}: {e}", staging.display()));
+            left = true;
+        }
+    }
+    if !left {
+        let _ = std::fs::remove_dir_all(staging);
     }
 }
 
@@ -976,6 +1133,125 @@ mod tests {
         // no staging folders left behind
         let left: Vec<_> = std::fs::read_dir(addons_dir.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".everlookdb")).collect();
         assert!(left.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn stagings(addons_dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(addons_dir.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(STAGING_PREFIX))
+            .map(|e| e.path())
+            .collect()
+    }
+
+    /// a failed swap puts the old version back; when even that fails, the old copy stays in staging and the next
+    /// recover puts it back; it is never deleted
+    #[test]
+    fn a_failed_install_never_loses_the_old_addon() {
+        let d = tmp("atomic");
+        let addons_dir = d.join("World of Warcraft").join("_forever_").join("Interface").join("AddOns");
+        let v1 = d.join("v1.zip");
+        let v2 = d.join("v2.zip");
+        make_zip(&v1, &[("Foo/Foo.toc", "## Version: 1.0"), ("Foo_Options/Foo_Options.toc", "## Version: 1.0")]);
+        make_zip(&v2, &[("Foo/Foo.toc", "## Version: 2.0"), ("Foo_Zed/Foo_Zed.toc", "## Version: 2.0")]);
+        let ours: HashSet<String> = install_zip(&addons_dir, &v1, &HashSet::new(), None).unwrap().into_iter().collect();
+        let read = |f: &str| std::fs::read_to_string(addons_dir.join(f).join(format!("{f}.toc"))).ok();
+
+        // placing the second new folder fails: everything goes back as it was
+        let mut fail_place = |a: &Path, b: &Path| {
+            if b.ends_with("Foo_Zed") && a.to_string_lossy().contains(STAGING_PREFIX) {
+                return Err(std::io::Error::other("denied"));
+            }
+            std::fs::rename(a, b)
+        };
+        let err = install_zip_with(&addons_dir, &v2, &ours, None, &mut fail_place).unwrap_err();
+        assert!(err.contains("Foo_Zed"), "{err}");
+        assert_eq!(read("Foo").as_deref(), Some("## Version: 1.0"));
+        assert_eq!(read("Foo_Options").as_deref(), Some("## Version: 1.0"));
+        assert!(read("Foo_Zed").is_none());
+        assert!(stagings(&addons_dir).is_empty());
+
+        // and putting the old Foo back fails too: it stays in staging, with a journal
+        let mut tries = 0;
+        let mut fail_more = |a: &Path, b: &Path| {
+            if b.ends_with("Foo_Zed") && a.to_string_lossy().contains(STAGING_PREFIX) {
+                return Err(std::io::Error::other("denied"));
+            }
+            if b == addons_dir.join("Foo") && a.parent().is_some_and(|p| p.ends_with("old")) {
+                tries += 1;
+                return Err(std::io::Error::other("in use"));
+            }
+            std::fs::rename(a, b)
+        };
+        let err = install_zip_with(&addons_dir, &v2, &ours, None, &mut fail_more).unwrap_err();
+        assert_eq!(tries, 1);
+        assert!(err.contains("kept safe"), "{err}");
+        assert!(read("Foo").is_none(), "Foo couldn't go back yet");
+        let left = stagings(&addons_dir);
+        assert_eq!(left.len(), 1);
+        assert_eq!(std::fs::read_to_string(left[0].join("old").join("Foo").join("Foo.toc")).unwrap(), "## Version: 1.0");
+
+        // the next start (or install) puts it back
+        recover_in(&addons_dir, &d.join("backups"));
+        assert_eq!(read("Foo").as_deref(), Some("## Version: 1.0"));
+        assert_eq!(read("Foo_Options").as_deref(), Some("## Version: 1.0"));
+        assert!(stagings(&addons_dir).is_empty());
+
+        // then a normal update works
+        install_zip(&addons_dir, &v2, &ours, None).unwrap();
+        assert_eq!(read("Foo").as_deref(), Some("## Version: 2.0"));
+        assert!(read("Foo_Options").is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// staging folders a crash left behind
+    #[test]
+    fn recovers_leftover_staging() {
+        let d = tmp("leftover");
+        let addons_dir = d.join("World of Warcraft").join("_forever_").join("Interface").join("AddOns");
+        let backups = d.join("backups");
+        let put = |dir: &Path, f: &str, text: &str| {
+            std::fs::create_dir_all(dir.join(f)).unwrap();
+            std::fs::write(dir.join(f).join(format!("{f}.toc")), text).unwrap();
+        };
+        let parent = addons_dir.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&addons_dir).unwrap();
+
+        // from before journals: a missing folder goes back; one whose place is taken goes to backups, not away
+        let legacy = parent.join(format!("{STAGING_PREFIX}1-legacy"));
+        put(&legacy.join("old"), "Gone", "## Version: old");
+        put(&legacy.join("old"), "Taken", "## Version: old");
+        put(&addons_dir, "Taken", "## Version: new");
+        recover_in(&addons_dir, &backups);
+        assert_eq!(std::fs::read_to_string(addons_dir.join("Gone").join("Gone.toc")).unwrap(), "## Version: old");
+        assert_eq!(std::fs::read_to_string(addons_dir.join("Taken").join("Taken.toc")).unwrap(), "## Version: new");
+        let kept: Vec<_> = std::fs::read_dir(&backups).unwrap().flatten().collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path().join("Taken").join("Taken.toc")).unwrap(), "## Version: old");
+        assert!(!legacy.exists());
+
+        // cut short mid-swap: the new half goes, the old comes back
+        let mid = parent.join(format!("{STAGING_PREFIX}2-mid"));
+        std::fs::remove_dir_all(addons_dir.join("Gone")).unwrap();
+        put(&mid.join("old"), "Gone", "## Version: old");
+        put(&addons_dir, "Gone", "## Version: half new");
+        put(&addons_dir, "Gone_Extra", "## Version: half new");
+        let j = Journal { moved: vec!["Gone".into()], placed: vec!["Gone".into(), "Gone_Extra".into()], done: false, backup: None };
+        write_journal(&mid, &j).unwrap();
+        recover_in(&addons_dir, &backups);
+        assert_eq!(std::fs::read_to_string(addons_dir.join("Gone").join("Gone.toc")).unwrap(), "## Version: old");
+        assert!(!addons_dir.join("Gone_Extra").exists());
+        assert!(!mid.exists());
+
+        // finished but not cleaned up: the old copies go only after their backup
+        let done = parent.join(format!("{STAGING_PREFIX}3-done"));
+        put(&done.join("old"), "Theirs", "## Version: theirs");
+        let j = Journal { moved: vec!["Theirs".into()], placed: vec!["Theirs".into()], done: true, backup: Some(d.join("taken-over")) };
+        write_journal(&done, &j).unwrap();
+        recover_in(&addons_dir, &backups);
+        assert_eq!(std::fs::read_to_string(d.join("taken-over").join("Theirs").join("Theirs.toc")).unwrap(), "## Version: theirs");
+        assert!(!done.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

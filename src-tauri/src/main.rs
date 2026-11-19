@@ -411,6 +411,13 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
         github_seen: Mutex::new(HashMap::new()),
     });
     std::thread::spawn(icons::prune);
+    // an install cut short last time (a crash, a power cut) is put right: the old addon back, or the swap finished
+    let ui_handle = app.clone();
+    std::thread::spawn(move || {
+        for i in installs(&ui_handle.state::<Ui>()) {
+            manager::recover_leftovers(&i.addons_dir);
+        }
+    });
 
     let handle = app.clone();
     let mut last: Option<(String, usize, Option<PathBuf>, Vec<worker::FileView>, config::Receipts)> = None;
