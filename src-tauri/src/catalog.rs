@@ -44,6 +44,9 @@ pub struct Addon {
     /// from a GitHub repo the player added (github.rs), not from the catalog
     #[serde(default)]
     pub custom: bool,
+    /// the release notes of `version` (https), when the catalog has them; see `changelog_url`
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub changelog: String,
     /// `version` as the window shows it (see `version_label`); set by `fetch`
     #[serde(default, skip_deserializing)]
     pub version_label: String,
@@ -90,6 +93,21 @@ impl Addon {
                     (!(name.contains(f.as_str()) || name.contains(word)), file.flavors.len())
                 })
         })
+    }
+}
+
+impl Addon {
+    /// Where to read what changed in `version`: the catalog's link, or for a GitHub addon its release page.
+    pub fn changelog_url(&self) -> Option<String> {
+        if self.changelog.starts_with("https://") {
+            return Some(self.changelog.clone());
+        }
+        let repo = self.url.strip_prefix("https://github.com/")?.trim_end_matches('/');
+        let ok = |s: &str| !s.is_empty() && !s.contains(['?', '#', ' ', '"', '<', '>']);
+        if repo.split('/').count() != 2 || !ok(repo) || !ok(&self.version) {
+            return None;
+        }
+        Some(format!("https://github.com/{repo}/releases/tag/{}", self.version))
     }
 }
 
@@ -323,6 +341,25 @@ mod tests {
         assert!(wa.file_for(&["forever".into()]).is_none());
         assert!(wa.file_for(&["ptr".into(), "classic".into()]).is_some());
         assert!(c.addons.iter().any(|a| a.ours));
+    }
+
+    #[test]
+    fn release_notes_links() {
+        let a = |url: &str, version: &str, changelog: &str| Addon {
+            url: url.into(),
+            version: version.into(),
+            changelog: changelog.into(),
+            ..serde_json::from_str(r#"{"id":"x","name":"X"}"#).unwrap()
+        };
+        assert_eq!(a("https://github.com/BigWigsMods/BigWigs", "v427.9", "").changelog_url().as_deref(), Some("https://github.com/BigWigsMods/BigWigs/releases/tag/v427.9"));
+        assert_eq!(a("https://github.com/o/r/", "bundle/v1+x", "").changelog_url().as_deref(), Some("https://github.com/o/r/releases/tag/bundle/v1+x"));
+        assert_eq!(a("https://www.tukui.org/elvui", "13.80", "https://tukui.org/changelog#elvui").changelog_url().as_deref(), Some("https://tukui.org/changelog#elvui"));
+        assert_eq!(a("https://www.tukui.org/elvui", "13.80", "").changelog_url(), None);
+        assert_eq!(a("https://github.com/o/r", "", "").changelog_url(), None);
+        assert_eq!(a("https://github.com/o/r", "1.0", "javascript:alert(1)").changelog_url().as_deref(), Some("https://github.com/o/r/releases/tag/1.0"));
+        // an old catalog without the field reads fine
+        let c: Catalog = serde_json::from_str(r#"{"version":1,"addons":[{"id":"x","name":"X"}]}"#).unwrap();
+        assert_eq!(c.addons[0].changelog, "");
     }
 
     #[test]

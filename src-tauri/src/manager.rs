@@ -157,6 +157,10 @@ pub struct Item {
     pub latest_label: Option<String>,
     /// when the newest version was released (the catalog's time, RFC 3339), shown next to its Update button
     pub latest_released: Option<String>,
+    /// what changed in the newest version (release notes), when there is a link
+    pub changelog: Option<String>,
+    /// the folder whose .toc speaks for the addon ("Open folder" opens it)
+    pub main: String,
     pub update: bool,
     /// folders in AddOns (not ours) that are in the way of the newest version: "Replace (backup kept)"
     pub conflict: Vec<String>,
@@ -374,6 +378,8 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                 custom: entry.is_some_and(|a| a.custom),
                 latest_label: latest.as_deref().map(version_label),
                 latest_released: entry.filter(|_| latest.is_some()).map(|a| a.released.clone()).filter(|r| !r.is_empty()),
+                changelog: entry.filter(|_| latest.is_some()).and_then(Addon::changelog_url),
+                main: g.main.clone(),
                 latest,
                 previous: record.and_then(|r| r.previous.as_ref().filter(|p| p.zip.is_file()).map(|p| p.version.clone())),
                 url: entry.map(|a| a.url.clone()).or(toc.website.clone()),
@@ -436,7 +442,10 @@ pub fn download(url: &str, expect: u64, dest: &Path, progress: OnProgress) -> Re
     }
     let http = reqwest::blocking::Client::builder()
         .user_agent(concat!("EverlookDB/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(600))
+        // reqwest's blocking timeout counts per step (connecting, each read), not for the whole download: a big
+        // addon on a slow line is fine, a download that stops sending for a minute is given up
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(60))
         .build()
         .map_err(logged("EverlookDB couldn't start the download. Try again."))?;
     let mut resp = http.get(url).send().map_err(|e| net_text(&e))?;
@@ -856,6 +865,9 @@ pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress:
         None => None,
     };
     keep_only(&dir, &[Some(&zip), previous.as_ref().map(|p| &p.zip)]);
+    if backup.is_some() {
+        prune_backups(&config::dir().join("backups"), &sanitize(&addon.name), KEEP_BACKUPS);
+    }
     let rec = Record {
         id: addon.id.clone(),
         name: addon.name.clone(),
@@ -870,6 +882,27 @@ pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress:
     Conflicts::clear(&install.id, &addon.id);
     config::log(&format!("installed {} {} into {}", addon.id, addon.version, install.id));
     Ok(Change { install: install.name.clone(), name: addon.name.clone(), from: old.map(|r| r.version), to: addon.version.clone(), running: crate::wow::game_running(install) })
+}
+
+/// How many backups of one addon are kept (the newest).
+const KEEP_BACKUPS: usize = 3;
+
+/// Delete all but the newest `keep` backups named `<name>-YYYYMMDD-HHMMSS` in `dir`. Other folders are left alone.
+fn prune_backups(dir: &Path, name: &str, keep: usize) {
+    let stamp_of = |file: &str| -> Option<String> {
+        let rest = file.strip_prefix(name)?.strip_prefix('-')?;
+        let ok = rest.len() == 15 && rest.as_bytes()[8] == b'-' && rest.chars().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit());
+        ok.then(|| rest.to_string())
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut found: Vec<(String, PathBuf)> = rd.flatten().filter_map(|e| stamp_of(&e.file_name().to_string_lossy()).map(|s| (s, e.path()))).collect();
+    found.sort();
+    let n = found.len();
+    for (_, p) in found.into_iter().take(n.saturating_sub(keep)) {
+        if let Err(e) = std::fs::remove_dir_all(&p) {
+            config::log(&format!("can't remove the old backup {}: {e}", p.display()));
+        }
+    }
 }
 
 fn sanitize(s: &str) -> String {
@@ -1289,6 +1322,18 @@ mod tests {
             assert!(!idle());
             assert!(hold().is_none());
         }
+    }
+
+    #[test]
+    fn keeps_the_newest_three_backups_per_addon() {
+        let d = tmp("prune");
+        for n in ["Foo-20261101-100000", "Foo-20261102-100000", "Foo-20261103-100000", "Foo-20261104-100000", "Foo-20261105-090000", "Foo_Bar-20261101-100000", "Foo-recovered-20261101-100000", "Foo-x"] {
+            std::fs::create_dir_all(d.join(n)).unwrap();
+        }
+        prune_backups(&d, "Foo", 3);
+        assert_eq!(names(&d), vec!["Foo-20261103-100000", "Foo-20261104-100000", "Foo-20261105-090000", "Foo-recovered-20261101-100000", "Foo-x", "Foo_Bar-20261101-100000"]);
+        prune_backups(&d.join("missing"), "Foo", 3);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

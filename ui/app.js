@@ -378,8 +378,8 @@ function mineHtml(i) {
     : '';
   const bar =
     i.game && !q
-      ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready${handNote}` : 'Everything is up to date'}</p>
-         <button class="btn solid" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon for a new version, then updates all that have one">Update all</button></div>`
+      ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready in ${esc(i.name)}${handNote}` : `Everything in ${esc(i.name)} is up to date`}</p>
+         <button class="btn solid" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon in ${esc(i.name)} for a new version, then updates all that have one (other games are updated from their own page)">Update all</button></div>`
       : '';
   return bar + `<ul class="rows">${items.map((it) => mineRow(it, i)).join('')}</ul>`;
 }
@@ -482,7 +482,7 @@ function mineRow(it, i) {
     action = `${replaceButton(key, it.conflict)}<div class="released" title="${esc(it.conflict.join(', '))} ${it.conflict.length === 1 ? 'is' : 'are'} in AddOns from another app or put there by hand">${esc(it.conflict.join(', '))} in the way</div>`;
   } else if (it.update && it.catalog) {
     const hand = it.auto ? '' : ` title="EverlookDB can’t tell whether ${esc(it.latest_label || it.latest)} is newer than your ${esc(it.version_label || it.version || '')}, so it only replaces it when you click"`;
-    action = `<button class="btn" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}${hand}>Update to ${esc(it.latest_label || it.latest)}</button>${releasedLine(it.latest_released)}`;
+    action = `<button class="btn" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}${hand}>Update to ${esc(it.latest_label || it.latest)}</button>${releasedLine(it.latest_released, it.changelog)}`;
   } else if (it.catalog && it.latest) {
     action = `<span class="state ok">${CHECK}Up to date</span>`;
   } else if (it.catalog) {
@@ -612,7 +612,7 @@ function browseRow(a, i, it, runs) {
   } else if (it && it.update) {
     action = it.conflict?.length
       ? replaceButton(a.id, it.conflict)
-      : `<button class="btn" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version_label || a.version)}</button>${releasedLine(a.released)}`;
+      : `<button class="btn" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version_label || a.version)}</button>${releasedLine(a.released, notesUrl(a))}`;
   } else if (it) {
     action = `<span class="state ok">${CHECK}Installed</span>`;
   } else {
@@ -648,8 +648,18 @@ function when(iso) {
 }
 const exact = (iso) => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d.toLocaleString() : ''; };
 
-// under an Update button: when that version came out
-const releasedLine = (iso) => (when(iso) ? `<div class="released" title="${esc(exact(iso))}">released ${esc(when(iso))}</div>` : '');
+// under an Update button: when that version came out, and a link to what changed in it
+const releasedLine = (iso, notes) => {
+  const day = when(iso) ? `<span title="${esc(exact(iso))}">released ${esc(when(iso))}</span>` : '';
+  const link = notes && notes.startsWith('https://') ? `<button class="link-button" type="button" data-act="url" data-url="${esc(notes)}" title="${esc(notes)}">What’s new</button>` : '';
+  return day || link ? `<div class="released">${[day, link].filter(Boolean).join(' · ')}</div>` : '';
+};
+// a catalog entry's release notes: its own link, or its GitHub release page (as catalog.rs changelog_url)
+function notesUrl(a) {
+  if ((a.changelog || '').startsWith('https://')) return a.changelog;
+  const m = /^https:\/\/github\.com\/([^/?#\s]+\/[^/?#\s]+)\/?$/.exec(a.url || '');
+  return m && a.version && !/[?#\s"<>]/.test(a.version) ? `https://github.com/${m[1]}/releases/tag/${a.version}` : null;
+}
 
 // the automatic check, for the footer: when it last ran, what it did, and when it runs next
 function autoLine() {
@@ -829,7 +839,7 @@ async function onAction(el) {
       if (el.dataset.url) invoke('open_url', { url: el.dataset.url }).catch((e) => showError(errText(e)));
       break;
     case 'open-folder':
-      invoke('open_addons_folder', { install: S.sel }).catch((e) => showError(errText(e)));
+      invoke('open_addons_folder', { install: S.sel, folder: el.dataset.folder || null }).catch((e) => showError(errText(e)));
       break;
     case 'add-folder':
       return addFolder();
@@ -996,7 +1006,7 @@ function ctxItems(key) {
     if (it.update && it.catalog && i.game) {
       out.push({ label: `Update to ${it.latest_label || it.latest}`, icon: 'update', act: 'install', data: { id: key, take: it.managed ? '' : '1' }, off: busy });
     }
-    out.push({ label: 'Open folder', icon: 'folder', act: 'open-folder', data: {} });
+    out.push({ label: 'Open folder', icon: 'folder', act: 'open-folder', data: { folder: it.main || '' } });
     links(it.ours && ourPage(key), it.url);
     out.push({ label: 'Copy name', icon: 'copy', act: 'copy-name', data: { name: it.name } });
     out.push('-');

@@ -1257,10 +1257,16 @@ fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Open the AddOns folder, or `folder` in it (an addon's own folder, when it is a real folder there).
 #[tauri::command(async)]
-fn open_addons_folder(app: AppHandle, ui: State<Ui>, install: String) -> Result<(), String> {
+fn open_addons_folder(app: AppHandle, ui: State<Ui>, install: String, folder: Option<String>) -> Result<(), String> {
     let i = find_install(&ui, &install)?;
-    let dir = if i.addons_dir.is_dir() { i.addons_dir } else { i.dir };
+    let own = folder.and_then(|f| manager::removable(&i.addons_dir, &f).ok());
+    let dir = match own {
+        Some(d) => d,
+        None if i.addons_dir.is_dir() => i.addons_dir,
+        None => i.dir,
+    };
     app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 

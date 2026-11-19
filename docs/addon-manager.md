@@ -59,6 +59,8 @@ If-None-Match):
 ```
 
 - `id`: `github:<owner>/<repo>`, `tukui:<slug>` or `wowi:<id>`. Stable; the app stores it per installed addon.
+- `changelog` (optional): an https link to what changed in `version`. Without it, the app links a GitHub addon's
+  release page (`<url>/releases/tag/<version>`) next to its Update button.
 - `flavors`: `retail`, `classic` (Cataclysm/MoP Classic, whatever `_classic_` holds), `classic_era`
   (`_classic_era_`), `forever` (`_forever_`), `ptr`, `beta`. When a release has no `release.json`, the
   server reads the `## Interface:` lines of the zip's `.toc` files (it may download the zip once per release
