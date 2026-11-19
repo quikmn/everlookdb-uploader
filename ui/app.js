@@ -370,9 +370,13 @@ function mineHtml(i) {
   }
   // always there: one click checks the addon list again and updates every addon that has a newer version
   const updates = i.game ? S.items.filter((it) => it.update && it.catalog) : [];
+  const byHand = updates.filter((it) => !it.auto).length;
+  const handNote = byHand
+    ? `<span class="where" title="Their installed versions can’t be compared with the newest ones (like 1.2-forever and 1.2), so EverlookDB only replaces them when you click their own Update button."> · ${plural(byHand, 'needs', 'need')} its own click</span>`
+    : '';
   const bar =
     i.game && !q
-      ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready` : 'Everything is up to date'}</p>
+      ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready${handNote}` : 'Everything is up to date'}</p>
          <button class="btn solid" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon for a new version, then updates all that have one">Update all</button></div>`
       : '';
   return bar + `<ul class="rows">${items.map((it) => mineRow(it, i)).join('')}</ul>`;

@@ -123,6 +123,9 @@ pub struct Item {
     /// when the newest version was released (the catalog's time, RFC 3339), shown next to its Update button
     pub latest_released: Option<String>,
     pub update: bool,
+    /// the automatic update (and Update all) may take it: EverlookDB installed it, or its version and the catalog's
+    /// are both plain numbers and the catalog's is higher. Otherwise an update waits for the player's click.
+    pub auto: bool,
     pub previous: Option<String>,
     pub url: Option<String>,
     /// the texture its .toc names as its icon, when that is a file in AddOns (the window asks for it separately)
@@ -163,6 +166,16 @@ pub fn differs(installed: Option<&str>, latest: &str) -> bool {
     match (numbers(&i), numbers(&l)) {
         (Some(a), Some(b)) => b > a,
         _ => true,
+    }
+}
+
+/// Whether `latest` is certainly newer than what is installed: both are plain dotted numbers and `latest` is higher.
+/// "1.2-forever" against "1.2" can't be told, so it isn't.
+pub fn strictly_newer(installed: Option<&str>, latest: &str) -> bool {
+    let Some(i) = installed else { return false };
+    match (numbers(&norm(i)), numbers(&norm(latest))) {
+        (Some(a), Some(b)) => b > a,
+        _ => false,
     }
 }
 
@@ -208,6 +221,7 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
             Item {
                 key: g.key.clone().unwrap_or_else(|| format!("folder:{}", g.main)),
                 update: latest.as_deref().is_some_and(|l| differs(version.as_deref(), l)),
+                auto: false,
                 name,
                 author: entry.map(|a| a.author.clone()).filter(|a| !a.is_empty()).or(toc.author.clone()),
                 notes: entry.map(|a| a.summary.clone()).filter(|s| !s.is_empty()).or(toc.notes.clone()),
@@ -228,6 +242,9 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
             }
         })
         .collect();
+    for it in items.iter_mut() {
+        it.auto = it.update && it.catalog && (it.managed || (adoptable(install, it) && it.latest.as_deref().is_some_and(|l| strictly_newer(it.version.as_deref(), l))));
+    }
     items.sort_by_key(|i| (!i.update, i.name.to_ascii_lowercase()));
     items
 }
@@ -769,11 +786,12 @@ pub fn pending<'a>(install: &Install, catalog: &'a Catalog) -> Vec<(&'a Addon, V
         return Vec::new();
     }
     // Every addon matched to the catalog with a newer version, also ones another app or the player put there
-    // (players expect "update by itself" to mean all of them). Those are taken over: their folders are passed as
-    // consent, and install() backs up the old copy first.
+    // (players expect "update by itself" to mean all of them). Those are taken over only when the catalog's version
+    // is certainly higher (both plain numbers), so a build like "1.2-forever" is never swapped for "1.2"; their
+    // folders are passed as consent, and install() backs up the old copy first.
     list(install, Some(catalog))
         .into_iter()
-        .filter(|it| it.update && it.catalog && (it.managed || adoptable(install, it)))
+        .filter(|it| it.auto)
         .filter_map(|it| catalog.get(&it.key).map(|a| (a, if it.managed { Vec::new() } else { it.folders.clone() })))
         .collect()
 }
@@ -828,6 +846,56 @@ mod tests {
         assert!(differs(Some("12.8.0"), "bundle/v12.9.0+v1.1.1"));
         assert!(!differs(Some("12.9.0"), "v12.8.0"));
         assert!(!differs(Some("v427.9"), "427.9"));
+    }
+
+    #[test]
+    fn never_adopts_an_addon_whose_version_cant_be_compared() {
+        assert!(strictly_newer(Some("1.2"), "1.3"));
+        assert!(strictly_newer(Some("v1.2"), "1.2.1"));
+        assert!(!strictly_newer(Some("1.2-forever"), "1.2"), "a different build of the same version");
+        assert!(!strictly_newer(Some("1.2-forever"), "1.3"), "can't be told");
+        assert!(!strictly_newer(Some("1.3"), "1.2"), "never a downgrade");
+        assert!(!strictly_newer(Some("1.2"), "1.2"));
+        assert!(!strictly_newer(None, "1.2"));
+
+        let (d, mut install) = test_install(
+            "adopt",
+            &[
+                ("Forever", "## Title: Forever
+## Version: 1.2-forever
+"),
+                ("Plain", "## Title: Plain
+## Version: 1.2
+"),
+                ("Ahead", "## Title: Ahead
+## Version: 2.0
+"),
+            ],
+        );
+        install.game = true;
+        let entry = |id: &str, folder: &str, version: &str| Addon {
+            id: id.into(),
+            name: folder.into(),
+            version: version.into(),
+            folders: vec![folder.into()],
+            files: vec![CFile { flavors: vec!["forever".into()], url: "https://example.test/x.zip".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let cat = Catalog {
+            version: 1,
+            addons: vec![entry("github:x/Forever", "Forever", "1.2"), entry("github:x/Plain", "Plain", "1.3"), entry("github:x/Ahead", "Ahead", "1.9")],
+            ..Default::default()
+        };
+        let items = list(&install, Some(&cat));
+        let get = |n: &str| items.iter().find(|i| i.name == n).unwrap();
+        // can't be told: a click may update it, the automatic update never does
+        assert!(get("Forever").update && !get("Forever").auto);
+        assert!(get("Plain").update && get("Plain").auto);
+        // the catalog is behind what is installed: no update at all
+        assert!(!get("Ahead").update && !get("Ahead").auto);
+        let ids: Vec<&str> = pending(&install, &cat).iter().map(|(a, _)| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["github:x/Plain"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
