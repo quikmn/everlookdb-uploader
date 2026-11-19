@@ -8,6 +8,8 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// what Rust sent back as an error: a sentence, or { message, conflict } from an install
+const errText = (e) => (e && typeof e === 'object' && 'message' in e ? String(e.message) : String(e));
 
 const S = {
   app: null,
@@ -55,7 +57,7 @@ async function loadItems() {
     S.items = await invoke('list_installed', { install: i.id });
   } catch (e) {
     S.items = [];
-    showError(String(e));
+    showError(errText(e));
   }
   renderList();
 }
@@ -465,14 +467,22 @@ function fitVersions(list) {
 const NO_GAME = 'This game isn’t installed here (only leftover files), so EverlookDB doesn’t install or update addons in it.';
 const noGame = () => `<span class="state nogame" title="${esc(NO_GAME)}">Game not installed</span>`;
 
+// folders another app (or the player) put in AddOns are in the way of an update: replace them, keeping a backup
+function replaceButton(id, folders) {
+  return `<button class="btn" type="button" data-act="replace" data-id="${esc(id)}" data-folders="${esc(JSON.stringify(folders))}" ${busyAttrs(id)} title="Replaces ${esc(folders.join(', '))}; the copies there now are kept in EverlookDB’s backups folder">Replace (backup kept)</button>`;
+}
+
 function mineRow(it, i) {
   const key = it.key;
   const open = S.open.has(key);
   let action;
   if (!i.game && it.update && it.catalog) {
     action = noGame();
+  } else if (it.update && it.catalog && it.conflict?.length) {
+    action = `${replaceButton(key, it.conflict)}<div class="released" title="${esc(it.conflict.join(', '))} ${it.conflict.length === 1 ? 'is' : 'are'} in AddOns from another app or put there by hand">${esc(it.conflict.join(', '))} in the way</div>`;
   } else if (it.update && it.catalog) {
-    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}>Update to ${esc(it.latest_label || it.latest)}</button>${releasedLine(it.latest_released)}`;
+    const hand = it.auto ? '' : ` title="EverlookDB can’t tell whether ${esc(it.latest_label || it.latest)} is newer than your ${esc(it.version_label || it.version || '')}, so it only replaces it when you click"`;
+    action = `<button class="btn" type="button" data-act="install" data-id="${esc(key)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(key)}${hand}>Update to ${esc(it.latest_label || it.latest)}</button>${releasedLine(it.latest_released)}`;
   } else if (it.catalog && it.latest) {
     action = `<span class="state ok">${CHECK}Up to date</span>`;
   } else if (it.catalog) {
@@ -600,11 +610,13 @@ function browseRow(a, i, it, runs) {
   } else if (!runs) {
     action = `<span class="state">Not for ${esc(i.name)}</span>`;
   } else if (it && it.update) {
-    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version_label || a.version)}</button>${releasedLine(a.released)}`;
+    action = it.conflict?.length
+      ? replaceButton(a.id, it.conflict)
+      : `<button class="btn" type="button" data-act="install" data-id="${esc(a.id)}" data-take="${it.managed ? '' : '1'}" ${busyAttrs(a.id)}>Update to ${esc(a.version_label || a.version)}</button>${releasedLine(a.released)}`;
   } else if (it) {
     action = `<span class="state ok">${CHECK}Installed</span>`;
   } else {
-    action = `<button class="btn gold" type="button" data-act="install" data-id="${esc(a.id)}" ${busyAttrs(a.id)}>Install</button>`;
+    action = `<button class="btn" type="button" data-act="install" data-id="${esc(a.id)}" ${busyAttrs(a.id)}>Install</button>`;
   }
   const page = a.ours && ourPage(a.id);
   const where = page ? 'everlookdb.com' : a.source === 'tukui' ? 'Tukui' : a.source === 'github' ? 'GitHub' : a.source;
@@ -693,7 +705,13 @@ function showChanges(title, changes, failed = []) {
             several ? `&ensp;<span class="where">${esc(c.install)}</span>` : ''
           }</li>`
       )
-      .join('')}${failed.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>
+      .join('')}${failed
+      .map((f) =>
+        typeof f === 'string'
+          ? `<li>${esc(f)}</li>`
+          : `<li><strong>${esc(f.name)}</strong>: ${esc(f.message)}${f.conflict?.length ? ` ${replaceButton(f.id, f.conflict)}` : ''}</li>`
+      )
+      .join('')}</ul>
     ${reloadLine(changes)}
     <button class="link-button close" type="button" data-act="dismiss">Dismiss</button>`;
   n.hidden = false;
@@ -706,6 +724,15 @@ function showError(text) {
   n.hidden = false;
 }
 
+// an install that failed: its sentence, and "Replace (backup kept)" when folders are in the way
+function showFailure(e, id) {
+  if (!(e && typeof e === 'object' && e.conflict?.length && id)) return showError(errText(e));
+  const n = $('notice');
+  n.className = 'notice bad';
+  n.innerHTML = `<h3>${esc(errText(e))}</h3><p>${replaceButton(id, e.conflict)}</p><button class="link-button close" type="button" data-act="dismiss">Dismiss</button>`;
+  n.hidden = false;
+}
+
 // ------------------------------------------------------------------------------------------------ actions
 
 async function run(key, label, fn) {
@@ -715,7 +742,7 @@ async function run(key, label, fn) {
   try {
     await fn();
   } catch (e) {
-    showError(String(e));
+    showFailure(e, key === '*' ? null : key);
   } finally {
     S.busy.delete(key);
     S.progress.delete(key);
@@ -725,9 +752,9 @@ async function run(key, label, fn) {
   }
 }
 
-function doInstall(id, take) {
+function doInstall(id, take, extra = []) {
   const it = S.items.find((x) => x.key === id);
-  const takeOver = take && it ? it.folders : [];
+  const takeOver = [...new Set([...(take && it ? it.folders : []), ...extra])];
   const updating = !!it;
   return run(id, updating ? 'Updating…' : 'Installing…', async () => {
     const c = await invoke('install_addon', { install: S.sel, id, takeOver });
@@ -748,6 +775,15 @@ async function onAction(el) {
     }
     case 'install':
       return doInstall(el.dataset.id, el.dataset.take === '1');
+    case 'replace': {
+      $('notice').hidden = true;
+      const it = S.items.find((x) => x.key === el.dataset.id);
+      let folders = [];
+      try {
+        folders = JSON.parse(el.dataset.folders || '[]');
+      } catch {}
+      return doInstall(el.dataset.id, !!it && !it.managed, folders);
+    }
     case 'update-all':
       return run('*', 'Checking…', async () => {
         // the newest versions first, so one click never misses a release from the last hour
@@ -790,10 +826,10 @@ async function onAction(el) {
     case 'copy-name':
       return copyName(el.dataset.name);
     case 'url':
-      if (el.dataset.url) invoke('open_url', { url: el.dataset.url }).catch((e) => showError(String(e)));
+      if (el.dataset.url) invoke('open_url', { url: el.dataset.url }).catch((e) => showError(errText(e)));
       break;
     case 'open-folder':
-      invoke('open_addons_folder', { install: S.sel }).catch((e) => showError(String(e)));
+      invoke('open_addons_folder', { install: S.sel }).catch((e) => showError(errText(e)));
       break;
     case 'add-folder':
       return addFolder();
@@ -867,7 +903,7 @@ async function saveList() {
     const path = await invoke('save_addon_list', { install: S.sel });
     if (path) showChanges(`Saved the addon list as ${path.split(/[\\/]/).pop()}`, []);
   } catch (e) {
-    showError(String(e));
+    showError(errText(e));
   }
 }
 
@@ -876,7 +912,7 @@ async function addFolder() {
     const added = await invoke('add_folder');
     if (added) await loadState().then(loadItems);
   } catch (e) {
-    showError(String(e));
+    showError(errText(e));
   }
 }
 
@@ -915,7 +951,7 @@ async function askRemove(key) {
   try {
     plan = await invoke('uninstall_plan', { install: S.sel, id: key });
   } catch (e) {
-    return showError(String(e));
+    return showError(errText(e));
   }
   S.plan = plan;
   S.confirm = key;
@@ -1217,7 +1253,7 @@ function setHours(v) {
   showHours(h);
   if (h === S.app.update_hours) return;
   S.app.update_hours = h;
-  invoke('set_setting', { name: 'update_hours', value: h }).catch((e) => showError(String(e)));
+  invoke('set_setting', { name: 'update_hours', value: h }).catch((e) => showError(errText(e)));
 }
 
 $('hours-less').addEventListener('click', () => setHours(S.app.update_hours - 1));
@@ -1273,7 +1309,7 @@ async function ghLookup() {
   try {
     GH.preview = await invoke('github_lookup', { install: S.sel, link });
   } catch (e) {
-    GH.error = String(e);
+    GH.error = errText(e);
   } finally {
     GH.looking = false;
     renderGh();
@@ -1292,7 +1328,7 @@ async function ghInstall(id) {
     showChanges(c.from ? `Updated ${c.name}` : `Installed ${c.name}`, [c]);
     await loadCatalog(false);
   } catch (e) {
-    GH.error = String(e);
+    GH.error = errText(e);
   } finally {
     S.busy.delete(id);
     S.progress.delete(id);

@@ -885,9 +885,13 @@ struct Progress<'a> {
     count: usize,
 }
 
+/// Install or update an addon. A folder in the way comes back as `conflict` (the window offers "Replace (backup
+/// kept)", which asks again with those folders in `take_over`).
 #[tauri::command]
-async fn install_addon(app: AppHandle, install: String, id: String, take_over: Vec<String>) -> Result<manager::Change, String> {
-    blocking(app, move |app| {
+async fn install_addon(app: AppHandle, install: String, id: String, take_over: Vec<String>) -> Result<manager::Change, manager::Failure> {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app = app2;
         let ui = app.state::<Ui>();
         let i = find_install(&ui, &install)?;
         if !i.game {
@@ -895,11 +899,18 @@ async fn install_addon(app: AppHandle, install: String, id: String, take_over: V
         }
         let cat = ui.catalog().ok_or("The addon list hasn't loaded yet.")?;
         let addon = cat.get(&id).ok_or("That addon isn't in the list any more.")?;
-        manager::install(&i, addon, &take_over, &mut |done, total| {
+        let r = manager::install(&i, addon, &take_over, &mut |done, total| {
             let _ = app.emit("progress", Progress { install: &i.id, id: &addon.id, done, total, index: 1, count: 1 });
-        })
+        });
+        if let Err(e) = &r {
+            if !e.conflict.is_empty() {
+                manager::Conflicts::remember(&i.id, &addon.id, &addon.version, &e.conflict);
+            }
+        }
+        r
     })
     .await
+    .map_err(|e| manager::Failure::from(e.to_string()))?
 }
 
 /// What uninstalling an addon would remove (its folders, and the ones kept because another addon lists them too),
@@ -1009,7 +1020,8 @@ async fn install_from_github(app: AppHandle, install: String, id: String, take_o
         let addon = ui.github_seen.lock().unwrap().get(&id).cloned().ok_or("Look the link up again, then install.")?;
         let change = manager::install(&i, &addon, &take_over, &mut |done, total| {
             let _ = app.emit("progress", Progress { install: &i.id, id: &addon.id, done, total, index: 1, count: 1 });
-        })?;
+        })
+        .map_err(|e| e.message)?;
         if addon.custom {
             let repo = addon.id.strip_prefix("github:").unwrap_or(&addon.id).to_string();
             {
@@ -1036,13 +1048,13 @@ fn rollback_addon(ui: State<Ui>, install: String, id: String) -> Result<manager:
     if !i.game {
         return Err(manager::NO_GAME.into());
     }
-    manager::rollback(&i, &id)
+    manager::rollback(&i, &id).map_err(|e| e.message)
 }
 
 #[derive(Serialize, Clone)]
 struct Updated {
     changes: Vec<manager::Change>,
-    failed: Vec<String>,
+    failed: Vec<manager::Failed>,
 }
 
 /// Update everything we installed in `targets`, telling the window how far each download is and which of how many.
@@ -1247,7 +1259,7 @@ fn note_auto(app: &AppHandle, off: bool, out: &Updated, waiting: &[String], cat:
     ui.catalog.lock().unwrap().auto = Some(AutoRun { at: now_rfc3339(), off, updated: out.changes.len(), failed: out.failed.len(), waiting: waiting_n });
     let _ = app.emit("catalog", ());
     for f in &out.failed {
-        config::log(&format!("auto-update failed: {f}"));
+        config::log(&format!("auto-update failed: {}: {}", f.id, f.message));
     }
     if !out.changes.is_empty() || !out.failed.is_empty() {
         let _ = app.emit("updated", out.clone());

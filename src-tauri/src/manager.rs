@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+const TOO_LARGE: &str = "The download is larger than 400 MB, so EverlookDB didn't install it.";
+
 /// Largest zip we download, and the most an archive may unpack to.
 const MAX_DOWNLOAD: u64 = 400 * 1024 * 1024;
 const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
@@ -90,9 +92,10 @@ impl Records {
     fn save(&self) -> Result<(), String> {
         let path = Self::path();
         let tmp = path.with_extension("json.tmp");
-        std::fs::create_dir_all(config::dir()).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+        const SAVE: &str = "EverlookDB couldn't save its list of installed addons in its data folder. Check that the disk isn't full.";
+        std::fs::create_dir_all(config::dir()).map_err(logged(SAVE))?;
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self).map_err(logged(SAVE))?).map_err(logged(SAVE))?;
+        std::fs::rename(&tmp, &path).map_err(logged(SAVE))
     }
     pub fn of(&self, install: &str) -> BTreeMap<String, Record> {
         self.installs.get(install).cloned().unwrap_or_default()
@@ -123,6 +126,8 @@ pub struct Item {
     /// when the newest version was released (the catalog's time, RFC 3339), shown next to its Update button
     pub latest_released: Option<String>,
     pub update: bool,
+    /// folders in AddOns (not ours) that are in the way of the newest version: "Replace (backup kept)"
+    pub conflict: Vec<String>,
     /// the automatic update (and Update all) may take it: EverlookDB installed it, or its version and the catalog's
     /// are both plain numbers and the catalog's is higher. Otherwise an update waits for the player's click.
     pub auto: bool,
@@ -134,6 +139,98 @@ pub struct Item {
     /// where it comes from, for the copied addon list: (label, value)
     #[serde(skip)]
     pub links: Vec<(&'static str, String)>,
+}
+
+/// Why an install or update didn't happen, said plainly (the details go to the log).
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct Failure {
+    pub message: String,
+    /// folders in AddOns that EverlookDB didn't install and the new version needs: "Replace (backup kept)" takes them
+    /// over (the copies there now go to the backups folder first)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conflict: Vec<String>,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Failure {
+        Failure { message, conflict: Vec::new() }
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Failure {
+        Failure::from(message.to_string())
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// One addon an update run couldn't update.
+#[derive(Serialize, Clone, Debug)]
+pub struct Failed {
+    pub id: String,
+    pub name: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conflict: Vec<String>,
+}
+
+/// The download was damaged: what the player is told.
+pub const DAMAGED: &str = "The download was damaged (it doesn't match what the addon list says), so nothing was changed. Try again.";
+const UNPACK: &str = "The addon couldn't be unpacked (the download may be damaged, or the disk is full), so nothing was changed. Try again.";
+const SAVE_ZIP: &str = "EverlookDB couldn't save the download in its data folder. Check that the disk isn't full, then try again.";
+const NEXT_TO_ADDONS: &str = "EverlookDB can't write next to your AddOns folder. Check that the game folder isn't read-only and the disk isn't full, then try again.";
+
+/// An error mapper: logs the raw error with `plain`, and gives `plain` (the sentence the player sees).
+fn logged<E: std::fmt::Display>(plain: impl Into<String>) -> impl FnOnce(E) -> String {
+    let plain = plain.into();
+    move |e| {
+        config::log(&format!("{plain} [{e}]"));
+        plain
+    }
+}
+
+/// A network error as a sentence.
+fn net_text(e: &reqwest::Error) -> String {
+    config::log(&format!("download: {e:?}"));
+    if e.is_timeout() {
+        "The download stalled (no data for a minute). Check your internet connection, then try again.".into()
+    } else if e.is_connect() {
+        "No connection to the download server. Check your internet connection, then try again.".into()
+    } else {
+        "The download was cut off. Check your internet connection, then try again.".into()
+    }
+}
+
+/// A download server's refusal as a sentence.
+pub fn status_text(code: u16) -> String {
+    match code {
+        404 | 410 => "The download isn't there any more (the author may have replaced it). Check again later.".into(),
+        403 | 429 => "The download server is limiting downloads right now. Try again in a few minutes.".into(),
+        500..=599 => "The download server is having trouble. Try again in a few minutes.".into(),
+        c => format!("The download server refused the download (error {c}). Try again later."),
+    }
+}
+
+/// Folders in the way, as a sentence.
+pub fn conflict_text(folders: &[String]) -> String {
+    let list = match folders {
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+        [] => String::new(),
+    };
+    let (is, it) = if folders.len() == 1 { ("is", "it") } else { ("are", "them") };
+    format!("{list} {is} already in your AddOns folder, from another app or put there by hand, so EverlookDB left {it} alone. Replace {it} to update (a backup is kept).")
+}
+
+/// Windows wouldn't move a folder: someone is using its files.
+fn in_use_text(f: &str, e: &std::io::Error) -> String {
+    config::log(&format!("can't move {f}: {e}"));
+    format!("WoW or another program is using {f}'s files. Close WoW (and anything that has the AddOns folder open), then try again.")
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -186,6 +283,7 @@ pub fn strictly_newer(installed: Option<&str>, latest: &str) -> bool {
 pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
     let folders = addons::scan(&install.addons_dir, &install.folder);
     let records = Records::load().of(&install.id);
+    let conflicts = Conflicts::load();
     let mut known: Vec<(String, Vec<String>)> = records.values().map(|r| (r.id.clone(), r.folders.clone())).collect();
     if let Some(c) = catalog {
         known.extend(c.addons.iter().filter(|a| !records.contains_key(&a.id) && !a.folders.is_empty()).map(|a| (a.id.clone(), a.folders.clone())));
@@ -224,6 +322,13 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
             Item {
                 key: g.key.clone().unwrap_or_else(|| format!("folder:{}", g.main)),
                 update: latest.as_deref().is_some_and(|l| differs(version.as_deref(), l)),
+                conflict: g
+                    .key
+                    .as_deref()
+                    .zip(latest.as_deref())
+                    .and_then(|(k, l)| conflicts.get(&install.id, k, l))
+                    .map(|c| c.folders.clone())
+                    .unwrap_or_default(),
                 auto: false,
                 name,
                 author: entry.map(|a| a.author.clone()).filter(|a| !a.is_empty()).or(toc.author.clone()),
@@ -295,33 +400,37 @@ fn stamp() -> String {
 /// progress to `progress`, throttled to PROGRESS_EVERY; the last report has done == total.
 pub fn download(url: &str, expect: u64, dest: &Path, progress: OnProgress) -> Result<(), String> {
     if !url.starts_with("https://") {
-        return Err("refusing a download that isn't https".into());
+        return Err("EverlookDB only downloads over https, so this addon wasn't installed.".into());
     }
     let http = reqwest::blocking::Client::builder()
         .user_agent(concat!("EverlookDB/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(600))
         .build()
-        .map_err(|e| e.to_string())?;
-    let mut resp = http.get(url).send().map_err(|e| format!("download failed: {e}"))?;
+        .map_err(logged("EverlookDB couldn't start the download. Try again."))?;
+    let mut resp = http.get(url).send().map_err(|e| net_text(&e))?;
     if !resp.status().is_success() {
-        return Err(format!("download failed: the server answered {}", resp.status().as_u16()));
+        config::log(&format!("download {url}: {}", resp.status()));
+        return Err(status_text(resp.status().as_u16()));
     }
     if resp.content_length().is_some_and(|n| n > MAX_DOWNLOAD) {
-        return Err("the download is too large".into());
+        return Err(TOO_LARGE.into());
     }
     let size = resp.content_length().filter(|n| *n > 0).unwrap_or(expect);
     let mut throttle = Throttle::new(PROGRESS_EVERY);
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent).map_err(logged(SAVE_ZIP))?;
     }
-    let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut out = std::fs::File::create(dest).map_err(logged(SAVE_ZIP))?;
     let mut buf = vec![0u8; 64 * 1024];
     let mut total: u64 = 0;
     if throttle.ready(Instant::now(), false) {
         progress(0, size);
     }
     loop {
-        let n = resp.read(&mut buf).map_err(|e| format!("download failed: {e}"))?;
+        let n = resp.read(&mut buf).map_err(|e| {
+            config::log(&format!("download {url}: {e}"));
+            "The download was cut off. Check your internet connection, then try again.".to_string()
+        })?;
         if n == 0 {
             break;
         }
@@ -329,18 +438,19 @@ pub fn download(url: &str, expect: u64, dest: &Path, progress: OnProgress) -> Re
         if total > MAX_DOWNLOAD {
             drop(out);
             let _ = std::fs::remove_file(dest);
-            return Err("the download is too large".into());
+            return Err(TOO_LARGE.into());
         }
-        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        out.write_all(&buf[..n]).map_err(logged(SAVE_ZIP))?;
         if throttle.ready(Instant::now(), false) {
             progress(total, size.max(total));
         }
     }
-    out.flush().map_err(|e| e.to_string())?;
+    out.flush().map_err(logged(SAVE_ZIP))?;
     if expect > 0 && total != expect {
         drop(out);
         let _ = std::fs::remove_file(dest);
-        return Err(format!("the download is {total} bytes, the catalog says {expect}; not installed"));
+        config::log(&format!("download {url}: {total} bytes, the catalog says {expect}"));
+        return Err(DAMAGED.into());
     }
     throttle.ready(Instant::now(), true);
     progress(total, total);
@@ -360,24 +470,27 @@ pub fn safe_parts(name: &str) -> Option<Vec<String>> {
     Some(parts)
 }
 
+const UNSAFE: &str = "The addon's zip has a file that would land outside the AddOns folder, so EverlookDB didn't install it.";
+
 /// Unpack a zip into `into`; returns the top-level folders. Any unsafe entry fails the whole thing.
 pub fn unzip(zip: &Path, into: &Path) -> Result<Vec<String>, String> {
-    let file = std::fs::File::open(zip).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("not a valid zip: {e}"))?;
+    let file = std::fs::File::open(zip).map_err(logged(DAMAGED))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(logged(DAMAGED))?;
     // check every name before writing anything
     for i in 0..archive.len() {
-        let entry = archive.by_index_raw(i).map_err(|e| e.to_string())?;
-        let name = entry.name().map_err(|e| e.to_string())?.into_owned();
+        let entry = archive.by_index_raw(i).map_err(logged(DAMAGED))?;
+        let name = entry.name().map_err(logged(DAMAGED))?.into_owned();
         if safe_parts(&name).is_none() || entry.enclosed_name().is_none() {
-            return Err(format!("the zip has an unsafe path ({name}); not installed"));
+            config::log(&format!("unsafe path in {}: {name}", zip.display()));
+            return Err(UNSAFE.into());
         }
     }
-    std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(into).map_err(logged(UNPACK))?;
     let mut tops: Vec<String> = Vec::new();
     let mut unpacked: u64 = 0;
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let parts = safe_parts(&entry.name().map_err(|e| e.to_string())?).ok_or("unsafe path")?;
+        let mut entry = archive.by_index(i).map_err(logged(DAMAGED))?;
+        let parts = safe_parts(&entry.name().map_err(logged(DAMAGED))?).ok_or(UNSAFE)?;
         let is_dir = entry.is_dir();
         // loose files next to the folders (a readme) aren't addons
         if parts.len() == 1 && !is_dir {
@@ -388,21 +501,21 @@ pub fn unzip(zip: &Path, into: &Path) -> Result<Vec<String>, String> {
         }
         let target = parts.iter().fold(into.to_path_buf(), |p, part| p.join(part));
         if !target.starts_with(into) {
-            return Err("unsafe path".into());
+            return Err(UNSAFE.into());
         }
         if is_dir {
-            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&target).map_err(logged(UNPACK))?;
             continue;
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(parent).map_err(logged(UNPACK))?;
         }
-        let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+        let mut out = std::fs::File::create(&target).map_err(logged(UNPACK))?;
         let mut limited = (&mut entry).take(MAX_UNPACKED - unpacked + 1);
-        let n = std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
+        let n = std::io::copy(&mut limited, &mut out).map_err(logged(UNPACK))?;
         unpacked += n;
         if unpacked > MAX_UNPACKED {
-            return Err("the zip unpacks to more than 2 GB; not installed".into());
+            return Err("The addon unpacks to more than 2 GB, so EverlookDB didn't install it.".into());
         }
     }
     tops.sort();
@@ -421,7 +534,7 @@ fn addon_root(staging: &Path, tops: &[String]) -> Result<(PathBuf, Vec<String>),
     if let [only] = tops {
         let inner = staging.join(only);
         let mut subs: Vec<String> = std::fs::read_dir(&inner)
-            .map_err(|e| e.to_string())?
+            .map_err(logged(UNPACK))?
             .flatten()
             .filter(|e| e.path().is_dir() && has_toc(&e.path()))
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -431,7 +544,7 @@ fn addon_root(staging: &Path, tops: &[String]) -> Result<(PathBuf, Vec<String>),
             return Ok((inner, subs));
         }
     }
-    Err("the zip holds no addon (no .toc file)".into())
+    Err("The download holds no addon (no .toc file), so nothing was installed.".into())
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -452,7 +565,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 fn staging_for(addons_dir: &Path) -> Result<PathBuf, String> {
     let parent = addons_dir.parent().ok_or("no Interface folder")?;
     let dir = parent.join(format!("{STAGING_PREFIX}{}-{}", std::process::id(), stamp()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("can't write to {}: {e}", parent.display()))?;
+    std::fs::create_dir_all(&dir).map_err(logged(NEXT_TO_ADDONS))?;
     Ok(dir)
 }
 
@@ -487,26 +600,25 @@ type Mover<'a> = &'a mut dyn FnMut(&Path, &Path) -> std::io::Result<()>;
 /// the ones the player asked us to take over). Returns the new folders. The old folders are deleted only once every
 /// new one is in place; when anything fails they are put back, and when even that fails they stay in the staging
 /// folder, which `recover` puts right (at the next install, and when the app starts).
-fn install_zip(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, backup_to: Option<&Path>) -> Result<Vec<String>, String> {
+fn install_zip(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, backup_to: Option<&Path>) -> Result<Vec<String>, Failure> {
     install_zip_with(addons_dir, zip, allowed, backup_to, &mut |a: &Path, b: &Path| std::fs::rename(a, b))
 }
 
-fn install_zip_with(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, backup_to: Option<&Path>, mv: Mover) -> Result<Vec<String>, String> {
-    std::fs::create_dir_all(addons_dir).map_err(|e| format!("can't create {}: {e}", addons_dir.display()))?;
+fn install_zip_with(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, backup_to: Option<&Path>, mv: Mover) -> Result<Vec<String>, Failure> {
+    std::fs::create_dir_all(addons_dir).map_err(logged(NEXT_TO_ADDONS))?;
     // anything an earlier swap left half done is put right first
     recover(addons_dir);
     let staging = staging_for(addons_dir)?;
     let unpack = staging.join("new");
-    let prepared = (|| {
+    let prepared = (|| -> Result<_, Failure> {
         let tops = unzip(zip, &unpack)?;
         let (root, folders) = addon_root(&unpack, &tops)?;
-        for f in &folders {
-            if addons_dir.join(f).exists() && !allowed.contains(f) {
-                return Err(format!("{f} is already in AddOns and EverlookDB didn't install it; not touched"));
-            }
+        let blocking: Vec<String> = folders.iter().filter(|f| addons_dir.join(f).exists() && !allowed.contains(*f)).cloned().collect();
+        if !blocking.is_empty() {
+            return Err(Failure { message: conflict_text(&blocking), conflict: blocking });
         }
         let old = staging.join("old");
-        std::fs::create_dir_all(&old).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&old).map_err(logged(NEXT_TO_ADDONS))?;
         Ok((root, folders, old))
     })();
     let (root, folders, old) = match prepared {
@@ -519,7 +631,7 @@ fn install_zip_with(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, ba
     let mut j = Journal { backup: backup_to.map(Path::to_path_buf), ..Default::default() };
     if let Err(e) = write_journal(&staging, &j) {
         let _ = std::fs::remove_dir_all(&staging);
-        return Err(format!("can't write next to AddOns: {e}"));
+        return Err(logged(NEXT_TO_ADDONS)(e).into());
     }
     // move the old folders aside: the ones being replaced and the ones the old version had that the new one drops
     let mut aside: Vec<&String> = allowed.iter().collect();
@@ -528,7 +640,7 @@ fn install_zip_with(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, ba
         let p = addons_dir.join(f);
         if p.exists() {
             if let Err(e) = mv(&p, &old.join(f)) {
-                return Err(undo(addons_dir, &staging, &root, &mut j, mv, format!("can't move {f} (is the game running?): {e}")));
+                return Err(undo(addons_dir, &staging, &root, &mut j, mv, in_use_text(f, &e)).into());
             }
             j.moved.push(f.clone());
             let _ = write_journal(&staging, &j);
@@ -536,7 +648,7 @@ fn install_zip_with(addons_dir: &Path, zip: &Path, allowed: &HashSet<String>, ba
     }
     for f in &folders {
         if let Err(e) = mv(&root.join(f), &addons_dir.join(f)) {
-            return Err(undo(addons_dir, &staging, &root, &mut j, mv, format!("can't place {f}: {e}")));
+            return Err(undo(addons_dir, &staging, &root, &mut j, mv, in_use_text(f, &e)).into());
         }
         j.placed.push(f.clone());
         let _ = write_journal(&staging, &j);
@@ -576,7 +688,7 @@ fn undo(addons_dir: &Path, staging: &Path, root: &Path, j: &mut Journal, mv: Mov
     }
     config::log(&format!("undo left {} for later: placed {:?}, moved {:?}", staging.display(), j.placed, j.moved));
     format!(
-        "{cause}. The earlier copy of {} is kept safe in {} and EverlookDB puts it back the next time it starts",
+        "{cause} The earlier copy of {} is kept safe in {} and EverlookDB puts it back the next time it starts.",
         j.moved.join(", "),
         staging.display()
     )
@@ -675,12 +787,12 @@ fn zip_dir(install: &Install, id: &str) -> PathBuf {
 
 /// Install or update `addon` in `install`. `take_over`: folders of this addon another app installed may be replaced
 /// (they are copied to the backups folder first).
-pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress: OnProgress) -> Result<Change, String> {
+pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress: OnProgress) -> Result<Change, Failure> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let file = addon.file_for(&install.accepts).ok_or_else(|| format!("{} has no download for {}", addon.name, install.name))?;
+    let file = addon.file_for(&install.accepts).ok_or_else(|| format!("{} has no download for {}.", addon.name, install.name))?;
     // from a repo the player added: only a zip attached to one of its GitHub releases
     if addon.custom && !crate::github::safe_download(&file.url) {
-        return Err(format!("{}'s download isn't a GitHub release file; not installed", addon.name));
+        return Err(format!("{}'s download isn't a GitHub release file, so EverlookDB didn't install it.", addon.name).into());
     }
     let mut records = Records::load();
     let old = records.of(&install.id).get(&addon.id).cloned();
@@ -689,7 +801,7 @@ pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress:
     let zip = dir.join(&name);
     let tmp = dir.join(format!("{name}.part"));
     download(&file.url, file.size, &tmp, progress)?;
-    std::fs::rename(&tmp, &zip).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &zip).map_err(logged(SAVE_ZIP))?;
 
     let mut allowed: HashSet<String> = old.as_ref().map(|r| r.folders.iter().cloned().collect()).unwrap_or_default();
     let take: HashSet<String> = take_over.iter().filter(|f| !allowed.contains(*f)).cloned().collect();
@@ -722,6 +834,7 @@ pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress:
     };
     records.installs.entry(install.id.clone()).or_default().insert(addon.id.clone(), rec);
     records.save()?;
+    Conflicts::clear(&install.id, &addon.id);
     config::log(&format!("installed {} {} into {}", addon.id, addon.version, install.id));
     Ok(Change { install: install.name.clone(), name: addon.name.clone(), from: old.map(|r| r.version), to: addon.version.clone(), running: crate::wow::game_running(install) })
 }
@@ -742,11 +855,11 @@ fn keep_only(dir: &Path, keep: &[Option<&PathBuf>]) {
 }
 
 /// Put the previous version back (from its kept zip).
-pub fn rollback(install: &Install, id: &str) -> Result<Change, String> {
+pub fn rollback(install: &Install, id: &str) -> Result<Change, Failure> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = Records::load();
-    let rec = records.of(&install.id).get(id).cloned().ok_or("EverlookDB didn't install this addon")?;
-    let prev = rec.previous.clone().filter(|p| p.zip.is_file()).ok_or("no earlier version kept")?;
+    let rec = records.of(&install.id).get(id).cloned().ok_or("EverlookDB didn't install this addon, so there's no earlier version to go back to.")?;
+    let prev = rec.previous.clone().filter(|p| p.zip.is_file()).ok_or("No earlier version of it is kept any more.")?;
     let allowed: HashSet<String> = rec.folders.iter().cloned().collect();
     let folders = install_zip(&install.addons_dir, &prev.zip, &allowed, None)?;
     let new = Record {
@@ -807,7 +920,7 @@ pub fn removable(addons_dir: &Path, name: &str) -> Result<PathBuf, String> {
     if p.parent() != Some(addons_dir) {
         return Err(format!("“{name}” isn't a folder in AddOns, so nothing was removed."));
     }
-    let meta = std::fs::symlink_metadata(&p).map_err(|e| format!("Can't read {name} in AddOns ({e}), so nothing was removed."))?;
+    let meta = std::fs::symlink_metadata(&p).map_err(logged(format!("Can't read {name} in AddOns, so nothing was removed.")))?;
     if is_link(&meta) {
         return Err(format!("{name} is a link to another folder (a junction or shortcut). EverlookDB doesn't remove links, so nothing was removed."));
     }
@@ -871,7 +984,7 @@ pub fn uninstall(install: &Install, catalog: Option<&Catalog>, key: &str, confir
     }
     if !failed.is_empty() {
         config::log(&format!("uninstalling {key} from {}: {}", install.id, failed.join("; ")));
-        return Err(format!("Couldn't remove {} (is the game running?): {}", p.name, failed.join(", ")));
+        return Err(format!("Windows couldn't move {} to the Recycle Bin: WoW or another program may be using its files. Close WoW, then try again.", p.name));
     }
     if p.managed {
         let _ = std::fs::remove_dir_all(zip_dir(install, key));
@@ -965,16 +1078,73 @@ fn adoptable(install: &Install, it: &Item) -> bool {
 
 /// Update every addon we know (see `pending`) that has a newer version in the catalog. `progress` gets the addon's id with
 /// each download report.
-pub fn update_all(install: &Install, catalog: &Catalog, progress: &mut dyn FnMut(&str, u64, u64)) -> (Vec<Change>, Vec<String>) {
+pub fn update_all(install: &Install, catalog: &Catalog, progress: &mut dyn FnMut(&str, u64, u64)) -> (Vec<Change>, Vec<Failed>) {
     let mut done = Vec::new();
     let mut failed = Vec::new();
     for (addon, consent) in pending(install, catalog) {
+        // a folder in the way was reported once for this version; it waits for the player's "Replace"
+        if Conflicts::known(&install.id, &addon.id, &addon.version) {
+            continue;
+        }
         match self::install(install, addon, &consent, &mut |d, t| progress(&addon.id, d, t)) {
             Ok(c) => done.push(c),
-            Err(e) => failed.push(format!("{}: {e}", addon.name)),
+            Err(e) => {
+                if !e.conflict.is_empty() {
+                    Conflicts::remember(&install.id, &addon.id, &addon.version, &e.conflict);
+                }
+                failed.push(Failed { id: addon.id.clone(), name: addon.name.clone(), message: e.message, conflict: e.conflict });
+            }
         }
     }
     (done, failed)
+}
+
+/// Folders in the way of an update (another app's or the player's), per install and addon, for the version that
+/// met them: reported once, then the addon waits for the player's "Replace (backup kept)" (conflicts.json).
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct Conflicts {
+    #[serde(default)]
+    pub seen: BTreeMap<String, Conflict>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+pub struct Conflict {
+    pub version: String,
+    pub folders: Vec<String>,
+}
+
+impl Conflicts {
+    fn path() -> PathBuf {
+        config::dir().join("conflicts.json")
+    }
+    fn key(install: &str, id: &str) -> String {
+        format!("{install}|{id}")
+    }
+    pub fn load() -> Conflicts {
+        std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+    fn save(&self) {
+        let _ = std::fs::create_dir_all(config::dir());
+        let _ = std::fs::write(Self::path(), serde_json::to_vec_pretty(self).unwrap_or_default());
+    }
+    /// The folders in the way of this version, if it met any.
+    pub fn get(&self, install: &str, id: &str, version: &str) -> Option<&Conflict> {
+        self.seen.get(&Self::key(install, id)).filter(|c| c.version == version)
+    }
+    pub fn known(install: &str, id: &str, version: &str) -> bool {
+        Self::load().get(install, id, version).is_some()
+    }
+    pub fn remember(install: &str, id: &str, version: &str, folders: &[String]) {
+        let mut c = Self::load();
+        c.seen.insert(Self::key(install, id), Conflict { version: version.into(), folders: folders.to_vec() });
+        c.save();
+    }
+    pub fn clear(install: &str, id: &str) {
+        let mut c = Self::load();
+        if c.seen.remove(&Self::key(install, id)).is_some() {
+            c.save();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1053,6 +1223,27 @@ mod tests {
     }
 
     #[test]
+    fn plain_sentences_and_conflicts_once() {
+        assert!(status_text(404).contains("isn't there any more"));
+        assert!(status_text(503).contains("trouble"));
+        assert_eq!(conflict_text(&["A".into()]), "A is already in your AddOns folder, from another app or put there by hand, so EverlookDB left it alone. Replace it to update (a backup is kept).");
+        assert!(conflict_text(&["A".into(), "B".into(), "C".into()]).starts_with("A, B and C are already"));
+        let e = std::io::Error::from_raw_os_error(5);
+        let t = in_use_text("Foo", &e);
+        assert!(!t.contains("os error") && t.contains("Close WoW"), "{t}");
+
+        let _ = config::dir(); // the tests' data folder
+        let (install, id) = (format!("test-{}", stamp()), "github:x/Clash");
+        assert!(!Conflicts::known(&install, id, "1.0"));
+        Conflicts::remember(&install, id, "1.0", &["Theirs".into()]);
+        assert!(Conflicts::known(&install, id, "1.0"));
+        // a newer version is tried (and reported) again
+        assert!(!Conflicts::known(&install, id, "1.1"));
+        Conflicts::clear(&install, id);
+        assert!(!Conflicts::known(&install, id, "1.0"));
+    }
+
+    #[test]
     fn rejects_zip_slip() {
         assert!(safe_parts("../evil.lua").is_none());
         assert!(safe_parts("Addon/../../evil.lua").is_none());
@@ -1065,7 +1256,7 @@ mod tests {
         let z = d.join("bad.zip");
         make_zip(&z, &[("Good/Good.toc", "## Title: Good"), ("../escaped.txt", "nope")]);
         let err = unzip(&z, &d.join("out")).unwrap_err();
-        assert!(err.contains("unsafe"), "{err}");
+        assert_eq!(err, UNSAFE);
         assert!(!d.join("escaped.txt").exists());
         assert!(!d.join("out").join("Good").exists(), "nothing is written when any entry is unsafe");
         let _ = std::fs::remove_dir_all(&d);
@@ -1117,7 +1308,9 @@ mod tests {
         // a zip that would overwrite a folder we didn't install is refused, and nothing changes
         let clash = d.join("clash.zip");
         make_zip(&clash, &[("Someone_Else/Someone_Else.toc", "## Title: Mine now")]);
-        assert!(install_zip(&addons_dir, &clash, &HashSet::new(), None).is_err());
+        let err = install_zip(&addons_dir, &clash, &HashSet::new(), None).unwrap_err();
+        assert_eq!(err.conflict, vec!["Someone_Else"]);
+        assert!(err.message.starts_with("Someone_Else is already in your AddOns folder"), "{err}");
         assert_eq!(read("Someone_Else"), "## Title: Not ours");
 
         // taking over (the player asked) backs the old folder up first
@@ -1163,7 +1356,7 @@ mod tests {
             std::fs::rename(a, b)
         };
         let err = install_zip_with(&addons_dir, &v2, &ours, None, &mut fail_place).unwrap_err();
-        assert!(err.contains("Foo_Zed"), "{err}");
+        assert!(err.message.contains("Foo_Zed") && err.message.contains("Close WoW"), "{err}");
         assert_eq!(read("Foo").as_deref(), Some("## Version: 1.0"));
         assert_eq!(read("Foo_Options").as_deref(), Some("## Version: 1.0"));
         assert!(read("Foo_Zed").is_none());
@@ -1183,7 +1376,7 @@ mod tests {
         };
         let err = install_zip_with(&addons_dir, &v2, &ours, None, &mut fail_more).unwrap_err();
         assert_eq!(tries, 1);
-        assert!(err.contains("kept safe"), "{err}");
+        assert!(err.message.contains("kept safe"), "{err}");
         assert!(read("Foo").is_none(), "Foo couldn't go back yet");
         let left = stagings(&addons_dir);
         assert_eq!(left.len(), 1);
@@ -1391,7 +1584,7 @@ mod tests {
 
         // size check
         let bad = Addon { files: vec![file("EverlookDB.zip", 12)], version: "v9".into(), ..v1.clone() };
-        assert!(super::install(&install, &bad, &[], &mut |_, _| {}).unwrap_err().contains("bytes"));
+        assert_eq!(super::install(&install, &bad, &[], &mut |_, _| {}).unwrap_err().message, DAMAGED);
 
         let key = "github:quikmn/EverlookDB";
         let p = plan(&install, None, key).unwrap();
