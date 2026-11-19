@@ -109,7 +109,18 @@ pub enum Origin {
     Cache,
     /// a development build with no server catalog yet: the sample in fixtures/
     Sample,
+    /// the server's catalog is in a newer format than this app reads: the app needs updating (the copy from last
+    /// time is used meanwhile, if there is one)
+    Outdated,
     None,
+}
+
+/// Why a fetch failed.
+#[derive(Debug, PartialEq)]
+pub enum FetchError {
+    /// the catalog's format is newer than this app knows
+    Newer(u32),
+    Other(String),
 }
 
 pub fn url(server: &str) -> String {
@@ -124,7 +135,21 @@ fn etag_path() -> std::path::PathBuf {
 }
 
 pub fn cached() -> Option<Catalog> {
-    std::fs::read(cache_path()).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    std::fs::read(cache_path()).ok().and_then(|b| serde_json::from_slice::<Catalog>(&b).ok()).filter(|c| c.version == 1)
+}
+
+/// The copy from last time, with its version labels, without asking the server: what the window shows at once while
+/// the fresh list loads.
+pub fn cached_labelled() -> Option<Catalog> {
+    let mut c = cached()?;
+    label(&mut c);
+    Some(c)
+}
+
+fn label(c: &mut Catalog) {
+    for a in c.addons.iter_mut() {
+        a.version_label = version_label(&a.version);
+    }
 }
 
 fn sample() -> Option<Catalog> {
@@ -175,8 +200,8 @@ pub fn version_label(raw: &str) -> String {
 /// sample. Each addon's `version_label` is filled in.
 pub fn fetch(server: &str) -> (Option<Catalog>, Origin) {
     let (mut c, origin) = fetch_any(server);
-    for a in c.iter_mut().flat_map(|c| c.addons.iter_mut()) {
-        a.version_label = version_label(&a.version);
+    if let Some(c) = c.as_mut() {
+        label(c);
     }
     (c, origin)
 }
@@ -193,43 +218,50 @@ fn fetch_any(server: &str) -> (Option<Catalog>, Origin) {
         Ok(Some(c)) => (Some(c), Origin::Live),
         Ok(None) => (have, Origin::Live),
         Err(e) => {
-            config::log(&format!("catalog: {e}"));
-            match have {
-                Some(c) => (Some(c), Origin::Cache),
-                None => match sample() {
-                    Some(c) => (Some(c), Origin::Sample),
-                    None => (None, Origin::None),
-                },
-            }
+            config::log(&format!("catalog: {e:?}"));
+            fallback(&e, have, sample)
         }
     }
 }
 
+/// What to use when the server's catalog couldn't be had: the copy from last time, then (dev builds) the sample.
+/// A catalog newer than the app says so (the app needs an update), whatever copy is used meanwhile.
+fn fallback(e: &FetchError, have: Option<Catalog>, sample: fn() -> Option<Catalog>) -> (Option<Catalog>, Origin) {
+    let newer = matches!(e, FetchError::Newer(_));
+    match have {
+        Some(c) => (Some(c), if newer { Origin::Outdated } else { Origin::Cache }),
+        None if newer => (None, Origin::Outdated),
+        None => match sample() {
+            Some(c) => (Some(c), Origin::Sample),
+            None => (None, Origin::None),
+        },
+    }
+}
+
 /// Ok(None): 304, our copy is current.
-fn fetch_http(target: &str, have: bool) -> Result<Option<Catalog>, String> {
+fn fetch_http(target: &str, have: bool) -> Result<Option<Catalog>, FetchError> {
+    let other = |e: String| FetchError::Other(e);
     let http = reqwest::blocking::Client::builder()
         .user_agent(concat!("EverlookDB/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| other(e.to_string()))?;
     let mut req = http.get(target).header("accept", "application/json");
     if have {
         if let Ok(tag) = std::fs::read_to_string(etag_path()) {
             req = req.header("if-none-match", tag.trim());
         }
     }
-    let resp = req.send().map_err(|e| format!("can't reach {target}: {e}"))?;
+    let resp = req.send().map_err(|e| other(format!("can't reach {target}: {e}")))?;
     match resp.status().as_u16() {
         304 => return Ok(None),
         200 => {}
-        code => return Err(format!("{target} answered {code}")),
+        code => return Err(other(format!("{target} answered {code}"))),
     }
     let tag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_string);
-    let bytes = resp.bytes().map_err(|e| e.to_string())?;
-    let c: Catalog = serde_json::from_slice(&bytes).map_err(|e| format!("catalog is not valid: {e}"))?;
-    if c.version != 1 {
-        return Err(format!("catalog version {} is newer than this app knows", c.version));
-    }
+    let bytes = resp.bytes().map_err(|e| other(e.to_string()))?;
+    check_version(&bytes)?;
+    let c: Catalog = serde_json::from_slice(&bytes).map_err(|e| other(format!("catalog is not valid: {e}")))?;
     let _ = std::fs::create_dir_all(config::dir());
     let _ = std::fs::write(cache_path(), &bytes);
     match tag {
@@ -243,9 +275,42 @@ fn fetch_http(target: &str, have: bool) -> Result<Option<Catalog>, String> {
     Ok(Some(c))
 }
 
+/// The catalog's format version, read before the rest (a newer format may not parse as this one).
+fn check_version(bytes: &[u8]) -> Result<(), FetchError> {
+    #[derive(Deserialize)]
+    struct Head {
+        #[serde(default)]
+        version: u32,
+    }
+    let head: Head = serde_json::from_slice(bytes).map_err(|e| FetchError::Other(format!("catalog is not valid: {e}")))?;
+    match head.version {
+        1 => Ok(()),
+        v if v > 1 => Err(FetchError::Newer(v)),
+        v => Err(FetchError::Other(format!("catalog version {v} is not valid"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_newer_catalog_asks_for_an_app_update() {
+        assert_eq!(check_version(br#"{"version":2,"addons":"a new shape"}"#), Err(FetchError::Newer(2)));
+        assert_eq!(check_version(br#"{"version":1}"#), Ok(()));
+        assert!(matches!(check_version(b"nope"), Err(FetchError::Other(_))));
+        let have = || Some(Catalog { version: 1, ..Default::default() });
+        let none = || None;
+        // newer: say so, keep showing the copy from last time
+        let (c, o) = fallback(&FetchError::Newer(2), have(), none);
+        assert!(c.is_some());
+        assert_eq!(o, Origin::Outdated);
+        assert_eq!(fallback(&FetchError::Newer(2), None, have).1, Origin::Outdated, "never the sample when the app is too old");
+        // offline: the copy from last time
+        assert_eq!(fallback(&FetchError::Other("offline".into()), have(), none).1, Origin::Cache);
+        assert_eq!(fallback(&FetchError::Other("offline".into()), None, none).1, Origin::None);
+        assert_eq!(fallback(&FetchError::Other("offline".into()), None, have).1, Origin::Sample);
+    }
 
     #[test]
     fn sample_parses_and_picks_files() {

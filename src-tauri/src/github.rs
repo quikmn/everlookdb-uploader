@@ -185,6 +185,18 @@ pub fn refresh(repos: &[String], catalog: Option<&Catalog>, ask: &dyn Fn(&str) -
     out
 }
 
+/// The answers from last time for the added repos the catalog doesn't list, without asking anyone (for showing the
+/// list at once while the fresh one loads).
+pub fn saved(repos: &[String], catalog: Option<&Catalog>) -> Vec<Addon> {
+    let saved = Saved::load();
+    repos
+        .iter()
+        .filter(|repo| in_catalog(catalog, &id_of(repo)).is_none())
+        .filter_map(|repo| saved.addons.iter().find(|(k, _)| k.eq_ignore_ascii_case(repo)))
+        .map(|(_, a)| Addon { custom: true, version_label: version_label(&a.version), ..a.clone() })
+        .collect()
+}
+
 /// Add the added repos' addons to the catalog (those it doesn't list itself), replacing older copies of them.
 pub fn merge(catalog: &mut Catalog, custom: &[Addon]) {
     catalog.addons.retain(|a| !a.custom);

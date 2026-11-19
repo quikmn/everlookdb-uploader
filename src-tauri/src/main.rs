@@ -221,6 +221,10 @@ struct CatalogState {
     auto: Option<AutoRun>,
     /// when the next automatic check is due (local time, RFC 3339)
     next: Option<String>,
+    /// a fetch is running (the list shown may be the copy from last time)
+    loading: bool,
+    /// when the last fetch finished, so two asks close together fetch once
+    fetched_at: Option<Instant>,
 }
 
 /// One run of the automatic check, for the window's footer.
@@ -772,18 +776,48 @@ struct CatalogReply {
     checked: Option<String>,
     auto: Option<AutoRun>,
     next: Option<String>,
+    loading: bool,
 }
 
-/// The catalog; `refresh` fetches it again first.
+/// The catalog; `refresh` fetches it again first. Without `refresh`, the first ask answers at once with the copy from
+/// last time (if any) and fetches the fresh one in the background ("catalog" event when it is in).
 #[tauri::command]
 async fn get_catalog(app: AppHandle, refresh: bool) -> Result<CatalogReply, String> {
     blocking(app, move |app| {
         let ui = app.state::<Ui>();
-        if refresh || ui.catalog.lock().unwrap().catalog.is_none() {
-            refresh_catalog(&ui);
+        if refresh {
+            refresh_catalog(&ui, None);
+        } else {
+            let start = {
+                let mut c = ui.catalog.lock().unwrap();
+                let start = c.catalog.is_none() && !c.loading && c.fetched_at.is_none();
+                if start {
+                    c.loading = true;
+                    let cached = catalog::cached_labelled();
+                    let repos = ui.shared.cfg.lock().unwrap().github_repos.clone();
+                    let custom = github::saved(&repos, cached.as_ref());
+                    let shown = match cached {
+                        Some(c) => Some(c),
+                        None if !custom.is_empty() => Some(Catalog { version: 1, ..Default::default() }),
+                        None => None,
+                    };
+                    c.catalog = shown.map(|mut cat| {
+                        github::merge(&mut cat, &custom);
+                        Arc::new(cat)
+                    });
+                }
+                start
+            };
+            if start {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    refresh_catalog(&app.state::<Ui>(), Some(Duration::from_secs(60)));
+                    let _ = app.emit("catalog", ());
+                });
+            }
         }
         let c = ui.catalog.lock().unwrap();
-        Ok(CatalogReply { catalog: c.catalog.clone(), origin: c.origin, checked: c.checked.clone(), auto: c.auto.clone(), next: c.next.clone() })
+        Ok(CatalogReply { catalog: c.catalog.clone(), origin: c.origin, checked: c.checked.clone(), auto: c.auto.clone(), next: c.next.clone(), loading: c.loading })
     })
     .await
 }
@@ -793,8 +827,19 @@ async fn blocking<T: Send + 'static>(app: AppHandle, f: impl FnOnce(&AppHandle) 
     tauri::async_runtime::spawn_blocking(move || f(&app)).await.map_err(|e| e.to_string())?
 }
 
+/// One fetch at a time.
+static REFRESH: Mutex<()> = Mutex::new(());
+
 /// Fetch the catalog, and the newest release of each GitHub repo the player added (github.rs), merged into it.
-fn refresh_catalog(ui: &Ui) {
+/// `max_age`: skip it when a fetch finished that recently (the window and the background both ask at start).
+fn refresh_catalog(ui: &Ui, max_age: Option<Duration>) {
+    let _one = REFRESH.lock().unwrap_or_else(|e| e.into_inner());
+    if let (Some(age), Some(at)) = (max_age, ui.catalog.lock().unwrap().fetched_at) {
+        if at.elapsed() < age {
+            return;
+        }
+    }
+    ui.catalog.lock().unwrap().loading = true;
     let (cat, origin) = catalog::fetch(&ui.shared.server);
     let repos = ui.shared.cfg.lock().unwrap().github_repos.clone();
     let server = ui.shared.server.clone();
@@ -814,6 +859,8 @@ fn refresh_catalog(ui: &Ui) {
     }
     c.origin = Some(origin);
     c.checked = Some(now_rfc3339());
+    c.loading = false;
+    c.fetched_at = Some(Instant::now());
 }
 
 /// A download's progress, for the window ("progress" event): addon `id` in `install`, `done` of `total` bytes
@@ -1129,10 +1176,8 @@ fn spawn_hourly(app: AppHandle) {
             let next = chrono::Local::now() + chrono::Duration::hours(i64::from(hours));
             ui.catalog.lock().unwrap().next = Some(next.to_rfc3339_opts(chrono::SecondsFormat::Secs, false));
             // the window may have just loaded it
-            if !(first && ui.catalog().is_some()) {
-                refresh_catalog(&ui);
-                let _ = app.emit("catalog", ());
-            }
+            refresh_catalog(&ui, first.then(|| Duration::from_secs(60)));
+            let _ = app.emit("catalog", ());
             first = false;
             let note = |off: bool, updated: usize, failed: usize| {
                 ui.catalog.lock().unwrap().auto = Some(AutoRun { at: now_rfc3339(), off, updated, failed });

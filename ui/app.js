@@ -68,6 +68,7 @@ async function loadCatalog(refresh) {
   S.checked = r.checked;
   S.auto = r.auto;
   S.next = r.next;
+  S.loading = r.loading;
   S.catIndex = new Map();
   for (const a of S.catalog?.addons || []) {
     S.catIndex.set(a.id, Search.index(a.name, [a.author, a.summary, ...(a.folders || [])]));
@@ -542,9 +543,18 @@ function confirmHtml(it, p) {
 
 function browseHtml(i) {
   if (!S.catalog) {
+    if (S.loading || !S.origin) {
+      return `<div class="empty"><h3>Loading the addon list…</h3>
+      <p>EverlookDB is getting the newest list from everlookdb.com.</p></div>`;
+    }
+    if (S.origin === 'outdated') {
+      return `<div class="empty"><h3>Update the app to see the addon list</h3>
+      <p>The addon list has a newer format than this version of EverlookDB reads. EverlookDB updates itself within the hour, or get the newest version from everlookdb.com.</p>
+      <button class="btn" type="button" data-act="url" data-url="https://everlookdb.com/contribute.html">Open everlookdb.com</button></div>`;
+    }
     return `<div class="empty"><h3>The addon list didn’t load</h3>
       <p>EverlookDB couldn’t reach everlookdb.com. Check your connection and try again.</p>
-      <button class="btn gold" type="button" data-act="refresh">Try again</button></div>`;
+      <button class="btn" type="button" data-act="refresh">Try again</button></div>`;
   }
   const q = S.q.trim();
   const installed = new Map(S.items.filter((it) => it.catalog).map((it) => [it.key, it]));
@@ -641,10 +651,12 @@ function renderStatus(text) {
   const n = (S.catalog?.addons || []).filter((a) => !a.custom).length;
   const line =
     text ||
+    (S.loading ? (S.catalog ? 'Loading the newest addon list… (showing the one from last time)' : 'Loading the addon list…') : null) ||
     {
       live: `Addon list checked ${when(S.checked)}`,
       cache: 'Offline: using the addon list from last time',
       sample: 'Sample addon list: the everlookdb.com catalog isn’t live yet',
+      outdated: 'Update the app: the addon list has a newer format than this version reads',
       none: 'The addon list couldn’t load',
     }[S.origin] ||
     'Loading the addon list…';
@@ -1387,7 +1399,7 @@ window.addEventListener('blur', () => (lastFocus = Date.now()));
 (async () => {
   await loadState();
   renderStatus();
-  await loadItems();
+  // the list from last time comes at once (the fresh one follows with a "catalog" event); it loads the addons too
   await loadCatalog(false);
   setTab('mine', false);
 })();
