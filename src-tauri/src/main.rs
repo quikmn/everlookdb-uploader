@@ -196,6 +196,8 @@ struct Ui {
     icon_files: Mutex<HashMap<(String, String), PathBuf>>,
     /// addons looked up by their GitHub link and shown to the player, by id: what "Install" installs
     github_seen: Mutex<HashMap<String, catalog::Addon>>,
+    /// where the window is now (saved to config.json when it closes)
+    window_rect: Mutex<Option<config::WindowRect>>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -279,9 +281,18 @@ fn run(args: Args) {
     let test_instance = std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_some_and(|v| !v.is_empty());
     // the window opens at start only when the player started the app (not at login, not a development or test run);
     // after that only when they click the tray icon
-    let show_at_start = !args.background && !test_instance && !cfg!(debug_assertions);
+    // after the app updated itself: the window opens again only if it was open, and never takes the focus
+    let restart = config::Restart::take();
+    let show_at_start = match restart {
+        Some(r) => r.window_open && !test_instance,
+        None => !args.background && !test_instance && !cfg!(debug_assertions),
+    };
+    let focus_at_start = restart.is_none();
+    if let Some(r) = restart {
+        config::log(&format!("started after an update (window was {})", if r.window_open { "open" } else { "closed" }));
+    }
     if !test_instance {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)));
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app, true)));
     }
     let app = builder
         .plugin(tauri_plugin_dialog::init())
@@ -313,7 +324,7 @@ fn run(args: Args) {
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            setup(app.handle(), shared, show_at_start)?;
+            setup(app.handle(), shared, show_at_start, focus_at_start)?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -321,7 +332,9 @@ fn run(args: Args) {
     app.run(|app, event| match event {
         // closing the window leaves the app in the tray until Quit
         RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+        RunEvent::WindowEvent { event: tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_), .. } => remember_window(app),
         RunEvent::WindowEvent { event: tauri::WindowEvent::Destroyed, .. } => {
+            save_window(app);
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
@@ -342,7 +355,7 @@ fn autostart() -> tauri_plugin_autostart::Builder {
     b
 }
 
-fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> {
+fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri::Result<()> {
     let paused = shared.cfg.lock().unwrap().paused;
     // point the login item at this copy of the app (an update may have installed it somewhere new); only for the
     // real app, never a development or test run, which would take over the player's login item
@@ -389,7 +402,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
     tray.on_menu_event(|app, e| on_menu(app, e.id.as_ref()))
         .on_tray_icon_event(|tray, e| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-                show_window(tray.app_handle());
+                show_window(tray.app_handle(), true);
             }
         })
         .build(app)?;
@@ -412,6 +425,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
         catalog: Mutex::new(CatalogState::default()),
         icon_files: Mutex::new(HashMap::new()),
         github_seen: Mutex::new(HashMap::new()),
+        window_rect: Mutex::new(None),
     });
     std::thread::spawn(icons::prune);
     // an install cut short last time (a crash, a power cut) is put right: the old addon back, or the swap finished
@@ -439,31 +453,47 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
     });
 
     if show {
-        show_window(app);
+        show_window(app, focus);
     }
     spawn_hourly(app.clone());
     spawn_updater(app.clone());
     Ok(())
 }
 
-/// Show the window, creating it if it was closed.
-fn show_window(app: &AppHandle) {
+/// Show the window, creating it if it was closed, where it was last (centred the first time). `focus`: the player
+/// asked for it (tray, a second start); otherwise (after the app updated itself) it opens without taking the focus.
+fn show_window(app: &AppHandle, focus: bool) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
-        let _ = w.set_focus();
+        if focus {
+            let _ = w.set_focus();
+        }
         return;
     }
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-    let built = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let screens: Vec<(f64, f64, f64, f64)> = app
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let s = m.scale_factor();
+            (m.position().x as f64 / s, m.position().y as f64 / s, m.size().width as f64 / s, m.size().height as f64 / s)
+        })
+        .collect();
+    let last = app.state::<Ui>().shared.cfg.lock().unwrap().window.filter(|r| r.on_screen(&screens));
+    let mut b = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("EverlookDB")
-        .inner_size(1100.0, 740.0)
         .min_inner_size(760.0, 520.0)
         .theme(Some(tauri::Theme::Dark))
         .background_color(tauri::window::Color(12, 20, 34, 255))
-        .center()
-        .build();
+        .focused(focus);
+    b = match last {
+        Some(r) => b.inner_size(r.w, r.h).position(r.x, r.y),
+        None => b.inner_size(1100.0, 740.0).center(),
+    };
+    let built = b.build();
     match built {
         Ok(w) => app_keys_only(&w),
         Err(e) => config::log(&format!("window: {e}")),
@@ -488,6 +518,30 @@ fn app_keys_only(w: &tauri::WebviewWindow) {
 
 #[cfg(not(all(windows, not(debug_assertions))))]
 fn app_keys_only(_w: &tauri::WebviewWindow) {}
+
+/// Note where the window is now (not while minimized or maximized).
+fn remember_window(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    if w.is_minimized().unwrap_or(false) || w.is_maximized().unwrap_or(false) {
+        return;
+    }
+    let (Ok(pos), Ok(size), Ok(s)) = (w.outer_position(), w.inner_size(), w.scale_factor()) else { return };
+    let r = config::WindowRect { x: pos.x as f64 / s, y: pos.y as f64 / s, w: size.width as f64 / s, h: size.height as f64 / s };
+    if let Some(ui) = app.try_state::<Ui>() {
+        *ui.window_rect.lock().unwrap() = Some(r);
+    }
+}
+
+/// Keep where the window was, for the next time it opens.
+fn save_window(app: &AppHandle) {
+    let Some(ui) = app.try_state::<Ui>() else { return };
+    let Some(r) = *ui.window_rect.lock().unwrap() else { return };
+    let mut c = ui.shared.cfg.lock().unwrap();
+    if c.window != Some(r) {
+        c.window = Some(r);
+        c.save();
+    }
+}
 
 fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
     let ui = app.state::<Ui>();
@@ -528,7 +582,7 @@ fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
 fn on_menu(app: &AppHandle, id: &str) {
     let ui = app.state::<Ui>();
     match id {
-        "window" => show_window(app),
+        "window" => show_window(app, true),
         "upload" => ui.send(Cmd::UploadNow),
         "site" => {
             let _ = app.opener().open_url(format!("{}/contribute.html", ui.shared.server), None::<&str>);
@@ -1059,6 +1113,8 @@ struct Updated {
 
 /// Update everything we installed in `targets`, telling the window how far each download is and which of how many.
 fn update_installs(app: &AppHandle, targets: &[wow::Install], cat: &catalog::Catalog) -> Updated {
+    // one job from start to end, so the app's self-update doesn't slip in between two addons
+    let _busy = manager::Busy::start();
     let count: usize = targets.iter().map(|i| manager::pending(i, cat).len()).sum();
     let mut out = Updated { changes: Vec::new(), failed: Vec::new() };
     let mut index = 0;
@@ -1266,7 +1322,9 @@ fn note_auto(app: &AppHandle, off: bool, out: &Updated, waiting: &[String], cat:
     }
 }
 
-/// Check for a new version of the app a minute after start and then every hour; install it silently and restart.
+/// Check for a new version of the app a minute after start and then every hour; download it, wait until no addon
+/// change and no upload is running, then install it silently and restart. The window comes back only if it was open,
+/// where it was, without taking the focus (config::Restart).
 fn spawn_updater(app: AppHandle) {
     if cfg!(debug_assertions) {
         return;
@@ -1276,16 +1334,51 @@ fn spawn_updater(app: AppHandle) {
         loop {
             std::thread::sleep(wait);
             wait = HOURLY;
-            let result = tauri::async_runtime::block_on(async {
-                let Some(update) = app.updater()?.check().await? else { return Ok(false) };
-                config::log(&format!("updating to {}", update.version));
-                update.download_and_install(|_, _| {}, || {}).await?;
-                Ok::<bool, tauri_plugin_updater::Error>(true)
+            let found = tauri::async_runtime::block_on(async {
+                let Some(update) = app.updater()?.check().await? else { return Ok(None) };
+                config::log(&format!("downloading the update to {}", update.version));
+                let bytes = update.download(|_, _| {}, || {}).await?;
+                Ok::<_, tauri_plugin_updater::Error>(Some((update, bytes)))
             });
-            match result {
-                Ok(true) => app.restart(),
-                Ok(false) => {}
-                Err(e) => config::log(&format!("update check failed: {e}")),
+            let (update, bytes) = match found {
+                Ok(Some(f)) => f,
+                Ok(None) => continue,
+                Err(e) => {
+                    config::log(&format!("update check failed: {e}"));
+                    continue;
+                }
+            };
+            // idle twice in a row, a few seconds apart, then hold every addon change off while the installer runs
+            let mut quiet = 0;
+            let hold = loop {
+                if manager::idle() && !worker::uploading() {
+                    quiet += 1;
+                } else {
+                    quiet = 0;
+                }
+                if quiet >= 2 {
+                    if let Some(h) = manager::hold() {
+                        if !worker::uploading() {
+                            break h;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(5));
+            };
+            remember_window(&app);
+            save_window(&app);
+            let open = app.get_webview_window("main").is_some_and(|w| w.is_visible().unwrap_or(false));
+            config::Restart::write(open);
+            config::log(&format!("installing the update to {}", update.version));
+            match update.install(bytes) {
+                Ok(()) => {
+                    drop(hold);
+                    app.restart();
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(config::dir().join("restart.json"));
+                    config::log(&format!("update install failed: {e}"));
+                }
             }
         }
     });

@@ -21,6 +21,13 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+/// An upload is being sent right now (the app's self-update waits for it).
+pub static UPLOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn uploading() -> bool {
+    UPLOADING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// EverlookDB.lua is capped at 5 MB by the server. Auction files are sent gzip-compressed (a 30 MB scan file is a
 /// few MB on the wire), so their cap is on the file as it is on disk.
 pub const MAX_UPLOAD: u64 = 5 * 1024 * 1024;
@@ -538,7 +545,10 @@ impl Watcher {
             let failures = self.shared.cfg.lock().unwrap().uploads.get(&k).map_or(0, |s| s.failures);
             let at = unix_now();
             t.seen = Some(sig);
-            match upload(&self.http, &self.shared.server, &bytes, is_auctions(f)) {
+            UPLOADING.store(true, std::sync::atomic::Ordering::SeqCst);
+            let outcome = upload(&self.http, &self.shared.server, &bytes, is_auctions(f));
+            UPLOADING.store(false, std::sync::atomic::Ordering::SeqCst);
+            match outcome {
                 Outcome::Sent(ans) => {
                     t.retry_at = None;
                     let level = if ans.partial() { "partial" } else { "ok" };

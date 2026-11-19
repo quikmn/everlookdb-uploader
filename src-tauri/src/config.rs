@@ -127,6 +127,52 @@ pub struct Config {
     /// catalog (see github.rs)
     #[serde(default)]
     pub github_repos: Vec<String>,
+    /// where the window was last (logical pixels), so it opens there again
+    #[serde(default)]
+    pub window: Option<WindowRect>,
+}
+
+/// A window's place and inner size, in logical pixels.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct WindowRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl WindowRect {
+    /// Whether enough of it (its title bar's middle) is on one of `screens` (x, y, w, h in logical pixels) to grab it.
+    pub fn on_screen(&self, screens: &[(f64, f64, f64, f64)]) -> bool {
+        let (cx, cy) = (self.x + self.w / 2.0, self.y + 16.0);
+        self.w >= 200.0 && self.h >= 150.0 && screens.iter().any(|&(x, y, w, h)| cx >= x && cx < x + w && cy >= y && cy < y + h)
+    }
+}
+
+/// Written just before the app installs its own update, read once at the next start: whether the window was open,
+/// so the new version opens it again (without taking the focus) or stays in the tray.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Restart {
+    pub window_open: bool,
+    /// unix seconds
+    pub at: i64,
+}
+
+impl Restart {
+    fn path() -> PathBuf {
+        dir().join("restart.json")
+    }
+    pub fn write(window_open: bool) {
+        let r = Restart { window_open, at: chrono::Local::now().timestamp() };
+        let _ = std::fs::create_dir_all(dir());
+        let _ = std::fs::write(Self::path(), serde_json::to_vec(&r).unwrap_or_default());
+    }
+    /// The note from just before an update (at most 30 minutes old), removed as it is read.
+    pub fn take() -> Option<Restart> {
+        let r: Option<Restart> = std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let _ = std::fs::remove_file(Self::path());
+        r.filter(|r| (chrono::Local::now().timestamp() - r.at).abs() < 30 * 60)
+    }
 }
 
 fn yes() -> bool {
@@ -151,7 +197,7 @@ pub fn clamp_hours(h: f64) -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new() }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None }
     }
 }
 
@@ -254,6 +300,21 @@ mod tests {
         assert_eq!(c.set_hours(&serde_json::json!(500)), 168);
         assert_eq!(c.set_hours(&serde_json::json!(0)), 1);
         assert_eq!(c.update_hours, 1);
+    }
+
+    #[test]
+    fn window_place_is_kept_only_when_on_a_screen() {
+        let screens = [(0.0, 0.0, 1920.0, 1080.0), (1920.0, 0.0, 1280.0, 1024.0)];
+        let r = WindowRect { x: 2000.0, y: 100.0, w: 1100.0, h: 740.0 };
+        assert!(r.on_screen(&screens));
+        assert!(!r.on_screen(&screens[..1]), "the second screen was unplugged");
+        assert!(!WindowRect { x: -5000.0, ..r }.on_screen(&screens));
+        assert!(!WindowRect { w: 10.0, ..r }.on_screen(&screens));
+        let c = Config { window: Some(r), ..Default::default() };
+        let back: Config = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+        assert_eq!(back.window, Some(r));
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.window, None);
     }
 
     #[test]

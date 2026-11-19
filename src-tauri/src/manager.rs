@@ -28,6 +28,38 @@ const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
 /// One write at a time, across every install.
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// Jobs that change addons running now (an update run counts as one from start to end, gaps between addons too).
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts a job as running while it lives.
+pub struct Busy(());
+
+impl Busy {
+    pub fn start() -> Busy {
+        ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Busy(())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// No install, update, rollback or uninstall is running.
+pub fn idle() -> bool {
+    ACTIVE.load(std::sync::atomic::Ordering::SeqCst) == 0 && LOCK.try_lock().is_ok()
+}
+
+/// Hold off every addon change (the app's self-update holds it while the installer takes over). None while busy.
+pub fn hold() -> Option<std::sync::MutexGuard<'static, ()>> {
+    if ACTIVE.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return None;
+    }
+    LOCK.try_lock().ok()
+}
+
 /// How often a download reports its progress (about ten times a second).
 pub const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
@@ -788,6 +820,7 @@ fn zip_dir(install: &Install, id: &str) -> PathBuf {
 /// Install or update `addon` in `install`. `take_over`: folders of this addon another app installed may be replaced
 /// (they are copied to the backups folder first).
 pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress: OnProgress) -> Result<Change, Failure> {
+    let _busy = Busy::start();
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let file = addon.file_for(&install.accepts).ok_or_else(|| format!("{} has no download for {}.", addon.name, install.name))?;
     // from a repo the player added: only a zip attached to one of its GitHub releases
@@ -856,6 +889,7 @@ fn keep_only(dir: &Path, keep: &[Option<&PathBuf>]) {
 
 /// Put the previous version back (from its kept zip).
 pub fn rollback(install: &Install, id: &str) -> Result<Change, Failure> {
+    let _busy = Busy::start();
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = Records::load();
     let rec = records.of(&install.id).get(id).cloned().ok_or("EverlookDB didn't install this addon, so there's no earlier version to go back to.")?;
@@ -965,6 +999,7 @@ pub type Trash<'a> = &'a mut dyn FnMut(&Path) -> Result<(), String>;
 /// `plan`) go to the Recycle Bin. For one EverlookDB installed, its kept zips and its record go too. Nothing else is
 /// recorded or changed.
 pub fn uninstall(install: &Install, catalog: Option<&Catalog>, key: &str, confirmed: &[String], trash: Trash) -> Result<Plan, String> {
+    let _busy = Busy::start();
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let p = plan(install, catalog, key)?;
     let same = |a: &[String], b: &[String]| {
@@ -1241,6 +1276,19 @@ mod tests {
         assert!(!Conflicts::known(&install, id, "1.1"));
         Conflicts::clear(&install, id);
         assert!(!Conflicts::known(&install, id, "1.0"));
+    }
+
+    #[test]
+    fn busy_jobs_hold_off_the_self_update() {
+        // other tests may be installing at the same moment; this checks the counting only
+        let before = ACTIVE.load(std::sync::atomic::Ordering::SeqCst);
+        {
+            let _a = Busy::start();
+            let _b = Busy::start();
+            assert_eq!(ACTIVE.load(std::sync::atomic::Ordering::SeqCst), before + 2);
+            assert!(!idle());
+            assert!(hold().is_none());
+        }
     }
 
     #[test]
