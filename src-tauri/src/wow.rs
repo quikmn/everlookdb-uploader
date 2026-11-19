@@ -3,8 +3,57 @@
 // Everything here only reads.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const FLAVOR: &str = "_forever_";
+
+/// How long one folder may take to answer before it is skipped (a sleeping network drive, an empty card reader).
+pub const FOLDER_WAIT: Duration = Duration::from_secs(3);
+
+/// Run `f` on each item at once, each on its own thread; results in order, None for the ones that didn't answer
+/// within `wait` (their threads are left to finish on their own).
+pub fn each_within<T: Send + 'static, R: Send + 'static>(items: Vec<T>, wait: Duration, f: fn(T) -> R) -> Vec<Option<R>> {
+    let n = items.len();
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, item) in items.into_iter().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((i, f(item)));
+        });
+    }
+    drop(tx);
+    let mut out: Vec<Option<R>> = (0..n).map(|_| None).collect();
+    let deadline = Instant::now() + wait;
+    let mut got = 0;
+    while got < n {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok((i, r)) => {
+                out[i] = Some(r);
+                got += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// The local hard drives (no network, CD or card-reader drives, which can hang or ask for a disc), as "C:\\".
+#[cfg(windows)]
+fn local_drives() -> Vec<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    const DRIVE_FIXED: u32 = 3;
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| format!("{}:\\", (b'A' + i) as char))
+        .filter(|d| {
+            let wide: Vec<u16> = d.encode_utf16().chain(Some(0)).collect();
+            unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_FIXED }
+        })
+        .map(PathBuf::from)
+        .collect()
+}
 
 /// Whether a folder looks like a game client folder (has WTF, Interface or the game executable).
 fn looks_like_client(dir: &Path) -> bool {
@@ -67,9 +116,11 @@ pub fn candidates() -> Vec<PathBuf> {
             "Blizzard\\World of Warcraft",
             "Battle.net\\World of Warcraft",
         ];
-        for drive in b'C'..=b'Z' {
-            let root = PathBuf::from(format!("{}:\\", drive as char));
-            if root.is_dir() {
+        // local hard drives only, and only the ones that answer quickly
+        let drives = local_drives();
+        let ready = each_within(drives.clone(), FOLDER_WAIT, |d: PathBuf| d.is_dir());
+        for (root, ok) in drives.iter().zip(ready) {
+            if ok == Some(true) {
                 out.extend(COMMON.iter().map(|rel| root.join(rel)));
             }
         }
@@ -344,18 +395,24 @@ pub fn roots(extra: &[PathBuf]) -> Vec<PathBuf> {
     };
     let key = |x: &Path| x.to_string_lossy().to_ascii_lowercase();
     let mut out: Vec<PathBuf> = Vec::new();
-    for p in found.iter().chain(extra) {
-        if let Some(r) = root_of(p) {
-            if !out.iter().any(|o| key(o) == key(&r)) {
-                out.push(r);
-            }
+    // every place at once; one that doesn't answer in time (a network drive that is gone) is skipped
+    let all: Vec<PathBuf> = found.iter().chain(extra).cloned().collect();
+    for r in each_within(all, FOLDER_WAIT, |p: PathBuf| root_of(&p)).into_iter().flatten().flatten() {
+        if !out.iter().any(|o| key(o) == key(&r)) {
+            out.push(r);
         }
     }
     out
 }
 
 pub fn all_installs(extra: &[PathBuf]) -> Vec<Install> {
-    let mut all: Vec<Install> = roots(extra).iter().flat_map(|r| installs_in(r)).collect();
+    installs_of(&roots(extra))
+}
+
+/// The installs in these `World of Warcraft` folders (found before: no drive scan), WoW Forever first. A folder that
+/// doesn't answer in time is skipped this once.
+pub fn installs_of(roots: &[PathBuf]) -> Vec<Install> {
+    let mut all: Vec<Install> = each_within(roots.to_vec(), FOLDER_WAIT, |r: PathBuf| installs_in(&r)).into_iter().flatten().flatten().collect();
     // real clients first (WoW Forever, then Blizzard's live games, then test clients); leftover folders last
     let rank = |f: &str| ["forever", "retail", "classic", "anniversary", "classic_era"].iter().position(|x| *x == f).unwrap_or(9);
     all.sort_by_key(|i| (!i.game, rank(&i.flavor)));
@@ -483,6 +540,20 @@ mod tests {
         assert!(runs_from(Path::new("/Applications/World of Warcraft/_retail_/World of Warcraft.app"), Path::new("/Applications/World of Warcraft/_retail_/")));
         // whatever runs here, asking never fails
         let _ = running_games();
+    }
+
+    #[test]
+    fn slow_folders_are_skipped() {
+        let got = each_within(vec![1u64, 0, 2], Duration::from_millis(300), |n: u64| {
+            if n == 0 {
+                std::thread::sleep(Duration::from_secs(5));
+            }
+            n * 10
+        });
+        assert_eq!(got, vec![Some(10), None, Some(20)]);
+        assert!(each_within(Vec::<u8>::new(), Duration::from_millis(10), |n: u8| n).is_empty());
+        #[cfg(windows)]
+        assert!(local_drives().iter().all(|d| d.to_string_lossy().ends_with(":\\")));
     }
 
     #[test]

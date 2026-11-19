@@ -198,6 +198,8 @@ struct Ui {
     github_seen: Mutex<HashMap<String, catalog::Addon>>,
     /// where the window is now (saved to config.json when it closes)
     window_rect: Mutex<Option<config::WindowRect>>,
+    /// the `World of Warcraft` folders found (the drive scan runs at start and on demand, not on every click)
+    roots: Mutex<Option<Vec<PathBuf>>>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -426,11 +428,13 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
         icon_files: Mutex::new(HashMap::new()),
         github_seen: Mutex::new(HashMap::new()),
         window_rect: Mutex::new(None),
+        roots: Mutex::new(None),
     });
     std::thread::spawn(icons::prune);
     // an install cut short last time (a crash, a power cut) is put right: the old addon back, or the swap finished
     let ui_handle = app.clone();
     std::thread::spawn(move || {
+        rescan(&ui_handle);
         for i in installs(&ui_handle.state::<Ui>()) {
             manager::recover_leftovers(&i.addons_dir);
         }
@@ -494,6 +498,9 @@ fn show_window(app: &AppHandle, focus: bool) {
         None => b.inner_size(1100.0, 740.0).center(),
     };
     let built = b.build();
+    // a game installed or moved since: looked for again in the background (the window gets "installs" if so)
+    let again = app.clone();
+    std::thread::spawn(move || rescan(&again));
     match built {
         Ok(w) => app_keys_only(&w),
         Err(e) => config::log(&format!("window: {e}")),
@@ -632,6 +639,7 @@ fn pick_folder(app: &AppHandle) {
         c.save();
         drop(c);
         ui.send(Cmd::Wake);
+        rescan(&handle);
         let _ = handle.emit("installs", ());
     });
 }
@@ -659,9 +667,36 @@ struct AppState {
     checked: Option<String>,
 }
 
+/// The installs in the folders found (scanning for them only when that hasn't happened yet).
 fn installs(ui: &Ui) -> Vec<wow::Install> {
+    let known = ui.roots.lock().unwrap().clone();
+    let roots = match known {
+        Some(r) => r,
+        None => {
+            let extra = ui.shared.cfg.lock().unwrap().extra_roots.clone();
+            let r = wow::roots(&extra);
+            *ui.roots.lock().unwrap() = Some(r.clone());
+            r
+        }
+    };
+    wow::installs_of(&roots)
+}
+
+/// Look for the game again (the usual places on the local drives, plus the folders the player added); tells the
+/// window when what was found changed.
+fn rescan(app: &AppHandle) {
+    let ui = app.state::<Ui>();
     let extra = ui.shared.cfg.lock().unwrap().extra_roots.clone();
-    wow::all_installs(&extra)
+    let found = wow::roots(&extra);
+    let changed = {
+        let mut r = ui.roots.lock().unwrap();
+        let changed = r.as_ref() != Some(&found);
+        *r = Some(found);
+        changed
+    };
+    if changed {
+        let _ = app.emit("installs", ());
+    }
 }
 
 fn find_install(ui: &Ui, id: &str) -> Result<wow::Install, String> {
@@ -1165,14 +1200,17 @@ fn add_folder(app: AppHandle, ui: State<Ui>) -> Result<Option<String>, String> {
     c.save();
     drop(c);
     ui.send(Cmd::Wake);
+    rescan(&app);
     Ok(Some(root.display().to_string()))
 }
 
 #[tauri::command(async)]
-fn forget_folder(ui: State<Ui>, root: String) {
+fn forget_folder(app: AppHandle, ui: State<Ui>, root: String) {
     let mut c = ui.shared.cfg.lock().unwrap();
     c.extra_roots.retain(|r| r.to_string_lossy() != root);
     c.save();
+    drop(c);
+    rescan(&app);
 }
 
 #[tauri::command(async)]
