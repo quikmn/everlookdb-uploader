@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.6.0 (2026-11-20)
+
+- Opens faster: your addon list shows at once from the last check, and the fresh one loads in the background.
+- Installs never lose the old addon: the old copy stays until the new one is fully in place, and an install cut short (a crash, a reboot) is put right the next time the app starts.
+- Automatic updates wait while World of Warcraft is running and tell you to /reload afterwards. The update timer follows the clock, so a sleeping PC doesn't push it back.
+- Automatic updates never downgrade: an addon EverlookDB didn't install is only replaced when the new version is clearly higher.
+- WoW folders are found once and remembered: the drive scan runs at start or when you ask, only on local hard drives, and skips drives that don't answer within 3 seconds.
+- Errors are plain sentences (details go to the log). A folder in the way of an install is reported once per version, with a Replace button that keeps a backup.
+- Open folder opens the addon's own folder. A What's new link sits next to updates, Update all says which game it covers, a download with no data for a minute gives up instead of hanging, and only the newest 3 backups per addon are kept.
+- The app's own updates wait until no addon change or upload is running; afterwards the window reopens only if it was open, where it was, without taking the focus.
+
 ## v0.5.1 (2026-11-19)
 
 - "Update addons by itself" now updates every addon EverlookDB knows, also ones you or another app installed (Bartender4, Questie...), not only the ones EverlookDB installed. The old copy is kept in the backups folder first. Developer checkouts (a folder with .git) and addons without a real version are left alone.
