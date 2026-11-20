@@ -392,6 +392,7 @@ const OUR_PAGES = {
   latticepartyraidframes: 'https://everlookdb.com/lattice.html',
   whack: 'https://everlookdb.com/whack.html',
   craftcolors: 'https://everlookdb.com/craftcolors.html',
+  everlookdbcrafting: 'https://everlookdb.com/everlookdb-crafting.html',
 };
 const ourPage = (id) => OUR_PAGES[String(id || '').split('/').pop().toLowerCase()] || null;
 
