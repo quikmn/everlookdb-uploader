@@ -31,6 +31,9 @@ const S = {
   // addon icons for the selected install, by row key: a data: URL, or null (no icon: a letter tile)
   icons: new Map(),
   iconWait: new Set(),
+  // our addons (src-tauri/src/ours.rs) for the selected install: the welcome card and the "EverlookDB addons" filter
+  ours: { install: null, addons: [], card: false, running: false, ticked: new Set(), run: null, hidden: false },
+  oursOnly: false,
 };
 
 const install = () => S.app?.installs.find((i) => i.id === S.sel) || null;
@@ -59,7 +62,32 @@ async function loadItems() {
     S.items = [];
     showError(errText(e));
   }
+  await loadOurs();
   renderList();
+}
+
+// our addons and whether the welcome card shows (ticked: every one not installed yet, until the player unticks it)
+async function loadOurs() {
+  const i = install();
+  const o = S.ours;
+  if (!i) return;
+  let r;
+  try {
+    r = await invoke('our_addons', { install: i.id });
+  } catch {
+    return;
+  }
+  if (o.install !== i.id) {
+    o.install = i.id;
+    o.ticked = new Set(r.addons.filter((a) => !a.installed).map((a) => a.id));
+    o.run = null;
+  } else {
+    for (const a of r.addons) if (!o.addons.some((x) => x.id === a.id) && !a.installed) o.ticked.add(a.id);
+  }
+  o.addons = r.addons;
+  o.running = r.running;
+  // once shown, the card stays until it is dismissed or closed (it shows what the run did)
+  o.card = !o.hidden && (r.card || (o.card && !!o.run));
 }
 
 async function loadCatalog(refresh) {
@@ -386,10 +414,12 @@ function mineHtml(i) {
     return `<div class="empty"><h3>${esc(i.name)} isn’t installed here</h3>
       <p>Only leftover files are in this folder, so there are no addons to show or install.</p></div>`;
   }
+  // the welcome card: our addons in one click (it has the screen's one gold button while it shows)
+  const card = !q && S.ours.card && i.game ? oursCardHtml(i) : '';
   if (!S.items.length) {
-    return `<div class="empty"><h3>No addons in ${esc(i.name)} yet</h3>
+    return `${card}<div class="empty${card ? ' quiet' : ''}"><h3>${card ? 'Or find others' : `No addons in ${esc(i.name)} yet`}</h3>
       <p>Find boss mods, bag addons, unit frames and more, and install them with one click.</p>
-      <button class="btn gold" type="button" data-act="tab" data-tab="browse">Get addons</button></div>`;
+      <button class="btn${card ? '' : ' gold'}" type="button" data-act="tab" data-tab="browse">Get addons</button></div>`;
   }
   if (!items.length) {
     return `<div class="empty"><h3>Nothing installed matches “${esc(q)}”</h3>
@@ -405,9 +435,146 @@ function mineHtml(i) {
   const bar =
     i.game && !q
       ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready in ${esc(i.name)}${handNote}` : `Everything in ${esc(i.name)} is up to date`}</p>
-         <button class="btn solid" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon in ${esc(i.name)} for a new version, then updates all that have one (other games are updated from their own page)">Update all</button></div>`
+         <button class="btn${card ? '' : ' solid'}" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon in ${esc(i.name)} for a new version, then updates all that have one (other games are updated from their own page)">Update all</button></div>`
       : '';
-  return bar + `<ul class="rows">${items.map((it) => mineRow(it, i)).join('')}</ul>`;
+  return card + bar + `<ul class="rows">${items.map((it) => mineRow(it, i)).join('')}</ul>`;
+}
+
+// ------------------------------------------------------------------------------------------------ our addons
+
+// where one of our addons is in a run: waiting, downloading (with %), installed, or what went wrong
+function oursState(a) {
+  const run = S.ours.run;
+  const r = run?.results.get(a.id);
+  if (r?.change) return { cls: 'ok', html: `${CHECK}Installed ${esc(r.change.to)}` };
+  if (r?.failure) return { cls: 'bad', html: esc(errText(r.failure)) };
+  if (a.installed) return { cls: 'ok', html: `${CHECK}Installed` };
+  if (run && run.ids.includes(a.id)) {
+    const p = S.progress.get(a.id);
+    if (!p) return { cls: 'wait', html: run.done ? 'Not installed' : 'Waiting…' };
+    if (p.total && p.done >= p.total) return { cls: 'busy', html: 'Unpacking…' };
+    return { cls: 'busy', html: p.total ? `Downloading ${Math.floor((p.done * 100) / p.total)}%` : `Downloading ${mb(p.done)}` };
+  }
+  return null;
+}
+
+function oursRowsHtml() {
+  const run = S.ours.run;
+  return S.ours.addons
+    .map((a) => {
+      const st = oursState(a);
+      const tick = a.installed || run
+        ? ''
+        : `<input type="checkbox" data-ours-tick="${esc(a.id)}" ${S.ours.ticked.has(a.id) ? 'checked' : ''} aria-label="Install ${esc(a.name)}">`;
+      return `<li class="wl-row${a.installed ? ' have' : ''}">
+        <label class="wl-label">
+          <span class="wl-tick">${tick || (st?.cls === 'ok' ? '' : '<span class="wl-dot"></span>')}</span>
+          <span class="wl-text"><span class="wl-name">${esc(a.name)}</span><span class="wl-sum">${esc(a.summary)}</span></span>
+        </label>
+        <span class="wl-state ${st?.cls || ''}" data-ours-state="${esc(a.id)}">${st?.html || ''}</span>
+      </li>`;
+    })
+    .join('');
+}
+
+// how installs go, in the card: the same safe path as every install
+function oursHow() {
+  return `They install like every EverlookDB install: downloaded from GitHub, checked, then swapped in whole. ${
+    S.ours.running ? 'WoW is running: type /reload in the game once they are in.' : 'They load the next time you start WoW.'
+  }`;
+}
+
+function oursCardHtml(i) {
+  const o = S.ours;
+  const run = o.run;
+  const todo = o.addons.filter((a) => !a.installed && o.ticked.has(a.id));
+  if (run?.done) {
+    const ok = [...run.results.values()].filter((r) => r.change).length;
+    const bad = [...run.results.values()].filter((r) => r.failure).length;
+    const reload = run.changes.some((c) => c.running) ? 'WoW is running: type /reload in the game to load them.' : 'They load the next time you start WoW (or type /reload if it’s open).';
+    return `<section class="welcome" aria-labelledby="welcome-title">
+      <div class="wl-head">
+        <h2 id="welcome-title">${bad ? (ok ? `${plural(ok, 'addon', 'addons')} installed, ${bad} didn’t` : 'Nothing was installed') : `Installed ${plural(ok, 'EverlookDB addon', 'EverlookDB addons')}`}</h2>
+        <p>${ok ? `${esc(reload)} EverlookDB keeps them updated from now on.` : 'Check your connection, then try again.'}</p>
+      </div>
+      <ul class="wl-list">${oursRowsHtml()}</ul>
+      <div class="wl-actions">${bad ? '<button class="btn" type="button" data-act="ours-install" data-where="card">Try again</button>' : ''}<button class="btn" type="button" data-act="ours-close">Close</button></div>
+    </section>`;
+  }
+  const n = todo.length;
+  const label = run ? 'Installing…' : n === o.addons.filter((a) => !a.installed).length ? 'Install all' : n ? `Install ${plural(n, 'addon', 'addons')}` : 'Install all';
+  const busy = run ? `disabled aria-busy="true" data-busy="${esc(run.count > 1 ? `Installing ${Math.min(run.index, run.count)} of ${run.count}` : 'Installing…')}"` : n ? '' : 'disabled';
+  return `<section class="welcome" aria-labelledby="welcome-title">
+    <div class="wl-head">
+      <h2 id="welcome-title">Get the EverlookDB addons</h2>
+      <p>Our own addons for ${esc(i.name)}, made to work together and with everlookdb.com: tick what you want and install them in one go.</p>
+    </div>
+    <ul class="wl-list">${oursRowsHtml()}</ul>
+    <p class="wl-how">${esc(oursHow())}</p>
+    <div class="wl-actions">
+      <button class="btn solid" type="button" data-act="ours-install" data-where="card" ${busy}>${esc(label)}</button>
+      ${run ? '' : '<button class="btn" type="button" data-act="ours-later">Not now</button>'}
+    </div>
+  </section>`;
+}
+
+// the permanent way back, in Get addons: our addons only, and one plain button for the missing ones
+function oursBarHtml(i) {
+  const o = S.ours;
+  const missing = o.addons.filter((a) => !a.installed);
+  const run = o.run;
+  const busy = run && !run.done ? `disabled aria-busy="true" data-busy="${esc(`Installing ${Math.min(run.index, run.count)} of ${run.count}`)}"` : '';
+  const text = !o.addons.length
+    ? `Our addons are made for WoW Forever; none of them runs in ${esc(i.name)}.`
+    : missing.length
+      ? `${o.addons.length - missing.length} of ${o.addons.length} installed in ${esc(i.name)}`
+      : `All ${o.addons.length} are installed in ${esc(i.name)}`;
+  const button = i.game && missing.length ? `<button class="btn" type="button" data-act="ours-install" data-where="bar" ${busy} title="${esc(oursHow())}">Install all missing (${missing.length})</button>` : '';
+  return `<div class="ours-bar"><p><strong>EverlookDB addons</strong>&ensp;${text}</p>${button}</div>`;
+}
+
+async function installOurs(where) {
+  const o = S.ours;
+  if (o.run && !o.run.done) return;
+  const ids = o.addons.filter((a) => !a.installed && (where === 'bar' || o.ticked.has(a.id))).map((a) => a.id);
+  if (!ids.length) return;
+  o.run = { where, ids, results: new Map(), changes: [], done: false, index: 1, count: ids.length };
+  for (const id of ids) S.busy.set(id, 'Waiting…');
+  renderList();
+  try {
+    const r = await invoke('install_ours', { install: S.sel, ids });
+    o.run.changes = r.changes;
+    if (where === 'bar' || !o.card) {
+      showChanges(r.changes.length ? `Installed ${plural(r.changes.length, 'EverlookDB addon', 'EverlookDB addons')}` : 'Nothing was installed', r.changes, r.failed);
+    }
+  } catch (e) {
+    showError(errText(e));
+  } finally {
+    o.run.done = true;
+    for (const id of ids) {
+      S.busy.delete(id);
+      S.progress.delete(id);
+      forgetIcons(id);
+    }
+    await loadItems();
+  }
+}
+
+// a progress event during a run: the row's state and the button's "Installing 2 of 11" in place
+function paintOurs() {
+  const run = S.ours.run;
+  if (!run || run.done) return;
+  for (const a of S.ours.addons) {
+    const el = document.querySelector(`[data-ours-state="${CSS.escape(a.id)}"]`);
+    const st = oursState(a);
+    if (el && st) {
+      el.className = `wl-state ${st.cls}`;
+      el.innerHTML = st.html;
+    }
+  }
+  for (const b of document.querySelectorAll('[data-act="ours-install"][aria-busy]')) {
+    b.dataset.busy = run.count > 1 ? `Installing ${Math.min(run.index, run.count)} of ${run.count}` : 'Installing…';
+  }
 }
 
 // our own addons' pages on everlookdb.com, by GitHub repository name
@@ -599,13 +766,23 @@ function browseHtml(i) {
   }
   const q = S.q.trim();
   const installed = new Map(S.items.filter((it) => it.catalog).map((it) => [it.key, it]));
+  // "EverlookDB addons": only our own (the set the welcome card offers), in its order, with Install all missing
+  const chip = `<div class="filters"><button class="chip" type="button" data-act="ours-filter" aria-pressed="${S.oursOnly}">
+    <i aria-hidden="true"></i>EverlookDB addons${S.ours.addons.length ? ` <span class="count">${S.ours.addons.length}</span>` : ''}</button></div>`;
+  if (S.oursOnly) {
+    // with the card's one-line summaries (the catalog leaves some empty)
+    const rows = S.ours.addons
+      .map((p) => { const a = S.catalog.addons.find((x) => x.id === p.id); return a && { ...a, summary: p.summary || a.summary }; })
+      .filter((a) => a && (!q || Search.score(S.catIndex.get(a.id), q) > 0));
+    return chip + oursBarHtml(i) + `<ul class="rows">${rows.map((a) => browseRow(a, i, installed.get(a.id), true)).join('')}</ul>`;
+  }
   let all = S.catalog.addons.map((a) => ({ a, s: Search.score(S.catIndex.get(a.id), q), runs: fileFor(a, i.accepts) }));
   all = all.filter((x) => x.s > 0);
   all.sort((x, y) => (q ? y.s - x.s : 0) || (y.a.ours - x.a.ours) || x.a.name.localeCompare(y.a.name));
   const here = all.filter((x) => x.runs);
   const other = all.filter((x) => !x.runs);
   const LIMIT = 200;
-  let html = '';
+  let html = chip;
   if (/github\.com\/|^[\w.-]+\/[\w.-]+$/i.test(q)) {
     return `<div class="empty"><h3>Install it from its GitHub link?</h3>
       <p>EverlookDB looks the addon up, shows you what it is, and installs it when you say so.</p>
@@ -892,6 +1069,24 @@ async function onAction(el) {
       return ghInstall(el.dataset.id);
     case 'dismiss':
       $('notice').hidden = true;
+      break;
+    case 'ours-install':
+      return installOurs(el.dataset.where);
+    case 'ours-later':
+      // for good: it never comes back (Get addons, EverlookDB addons has the same in one click)
+      S.ours.card = false;
+      S.ours.hidden = true;
+      invoke('set_setting', { name: 'ours_card_dismissed', value: true }).catch((e) => showError(errText(e)));
+      renderList();
+      break;
+    case 'ours-close':
+      S.ours.card = false;
+      S.ours.hidden = true;
+      renderList();
+      break;
+    case 'ours-filter':
+      S.oursOnly = !S.oursOnly;
+      renderList();
       break;
     case 'list-menu':
       return showListMenu($('list-menu').hidden);
@@ -1224,6 +1419,15 @@ document.addEventListener('click', (e) => {
   if (el && !el.disabled) onAction(el);
 });
 
+// the welcome card's ticks: the gold button counts what is ticked
+$('list').addEventListener('change', (e) => {
+  const id = e.target.dataset?.oursTick;
+  if (!id) return;
+  e.target.checked ? S.ours.ticked.add(id) : S.ours.ticked.delete(id);
+  renderList();
+  document.querySelector(`[data-ours-tick="${CSS.escape(id)}"]`)?.focus();
+});
+
 $('add-folder').addEventListener('click', addFolder);
 $('tab-mine').addEventListener('click', () => setTab('mine', false));
 $('tab-browse').addEventListener('click', () => setTab('browse', false));
@@ -1466,8 +1670,29 @@ listen('progress', (e) => {
   S.progress.set(p.id, p);
   if (S.busy.has('*')) S.progress.set('*', p);
   // "Update all" moved on to the next addon: its row's button turns busy, the last one's back
+  const run = S.ours.run;
+  if (run && !run.done && run.ids.includes(p.id)) {
+    run.index = p.index;
+    if (S.busy.get(p.id) === 'Waiting…') S.busy.set(p.id, 'Installing…');
+    paintOurs();
+  }
   if (updatingNow() !== before) renderList();
   else paintProgress();
+});
+// one of our addons is done in an "Install all": its row says so at once
+listen('ours', (e) => {
+  const p = e.payload;
+  const run = S.ours.run;
+  if (p.install !== S.sel || !run || run.done) return;
+  run.results.set(p.id, { change: p.change, failure: p.failure });
+  if (p.change) {
+    const a = S.ours.addons.find((x) => x.id === p.id);
+    if (a) a.installed = true;
+  }
+  S.busy.delete(p.id);
+  S.progress.delete(p.id);
+  run.index = Math.min(run.count, run.results.size + 1);
+  renderList();
 });
 listen('uploads', (e) => renderUploads(e.payload));
 listen('shared', (e) => renderShared(e.payload));

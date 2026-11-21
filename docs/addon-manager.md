@@ -68,7 +68,11 @@ If-None-Match):
 - `interfaces`: the `## Interface` numbers the file declares (WoW Forever is `16001`).
 - `folders`: the top-level folders the zip unpacks to (used to recognise addons already installed, e.g. by
   WowUp). May be empty if unknown.
-- `ours`: true for EverlookDB's own addons.
+- `ours`: true for EverlookDB's own addons. The app's welcome card ("Get the EverlookDB addons", Install all) and the
+  EverlookDB addons filter under Get addons offer every `ours` entry that has a release for the game, minus the
+  exclusions in `src-tauri/ours.json` (CraftColors, which stands down for EverlookDB Crafting, and the Tooltip
+  Collector); that file also gives their order and one-line summaries (src-tauri/src/ours.rs). The Price Feed is never
+  installed this way. The card shows on a new install and while none of them is installed, until "Not now".
 
 ## Install from GitHub
 

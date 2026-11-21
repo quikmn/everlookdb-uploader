@@ -11,6 +11,7 @@ mod giveaway;
 mod github;
 mod icons;
 mod manager;
+mod ours;
 mod shared;
 mod worker;
 mod wow;
@@ -278,10 +279,13 @@ impl Ui {
 
 /// A new install starts with Windows / at login (see Config::autostart_decided); set in run, used in setup.
 static AUTOSTART_NEW_INSTALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// This start is the app's first (no settings file yet): the welcome card offers our addons (ours.rs).
+static NEW_INSTALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn run(args: Args) {
     // no settings file yet: this is a new install
     let fresh = !Config::path().exists();
+    NEW_INSTALL.store(fresh, std::sync::atomic::Ordering::Relaxed);
     let mut cfg = Config::load();
     if !cfg.autostart_decided {
         cfg.autostart_decided = true;
@@ -341,6 +345,8 @@ fn run(args: Args) {
             copy_giveaway_code,
             github_lookup,
             install_from_github,
+            our_addons,
+            install_ours,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -1232,6 +1238,77 @@ async fn update_all(app: AppHandle, install: Option<String>) -> Result<Updated, 
     .await
 }
 
+/// Our addons for an install (ours.rs), and whether the welcome card shows there.
+#[derive(Serialize)]
+struct OursReply {
+    addons: Vec<ours::Pick>,
+    card: bool,
+    /// the game is running now: what gets installed loads after a /reload
+    running: bool,
+}
+
+fn our_picks(ui: &Ui, i: &wow::Install) -> Vec<ours::Pick> {
+    let Some(cat) = ui.catalog() else { return Vec::new() };
+    let installed = manager::list(i, Some(&cat)).into_iter().map(|it| it.key).collect();
+    ours::pick(&ours::list(), &cat, &i.accepts, &installed)
+}
+
+#[tauri::command(async)]
+fn our_addons(ui: State<Ui>, install: String) -> Result<OursReply, String> {
+    let i = find_install(&ui, &install)?;
+    let addons = our_picks(&ui, &i);
+    let dismissed = ui.shared.cfg.lock().unwrap().ours_card_dismissed;
+    let card = ours::show_card(dismissed, i.game, NEW_INSTALL.load(std::sync::atomic::Ordering::Relaxed), &addons);
+    Ok(OursReply { addons, card, running: i.game && wow::game_running(&i) })
+}
+
+/// How one addon of an "Install all" went, for the window ("ours" event) as soon as it is done.
+#[derive(Serialize, Clone)]
+struct OursStep<'a> {
+    install: &'a str,
+    id: &'a str,
+    change: Option<&'a manager::Change>,
+    failure: Option<&'a manager::Failure>,
+}
+
+/// Install our addons that aren't in the install yet (only `ids`, the ones the player left ticked), one after the
+/// other, each the way every install goes (manager::install: download, check, staging folder, swap, the old copy
+/// kept until the new one is in). One job from start to end, so the app's self-update waits for the whole run.
+#[tauri::command]
+async fn install_ours(app: AppHandle, install: String, ids: Vec<String>) -> Result<Updated, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        let i = find_install(&ui, &install)?;
+        if !i.game {
+            return Err(manager::NO_GAME.into());
+        }
+        let cat = ui.catalog().ok_or("The addon list hasn't loaded yet.")?;
+        let _busy = manager::Busy::start();
+        let picks = our_picks(&ui, &i);
+        let todo: Vec<&catalog::Addon> = ours::missing(&picks, Some(&ids)).into_iter().filter_map(|p| cat.get(&p.id)).collect();
+        config::log(&format!("install our addons into {}: {}", i.id, todo.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ")));
+        let count = todo.len();
+        let mut out = Updated { changes: Vec::new(), failed: Vec::new() };
+        for (n, addon) in todo.into_iter().enumerate() {
+            let r = manager::install(&i, addon, &[], &mut |done, total| {
+                let _ = app.emit("progress", Progress { install: &i.id, id: &addon.id, done, total, index: n + 1, count });
+            });
+            let _ = app.emit("ours", OursStep { install: &i.id, id: &addon.id, change: r.as_ref().ok(), failure: r.as_ref().err() });
+            match r {
+                Ok(c) => out.changes.push(c),
+                Err(e) => {
+                    if !e.conflict.is_empty() {
+                        manager::Conflicts::remember(&i.id, &addon.id, &addon.version, &e.conflict);
+                    }
+                    out.failed.push(manager::Failed { id: addon.id.clone(), name: addon.name.clone(), message: e.message, conflict: e.conflict });
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+}
+
 /// Ask for a `World of Warcraft` folder and remember it. Returns the folder added, or None (cancelled).
 #[tauri::command(async)]
 fn add_folder(app: AppHandle, ui: State<Ui>) -> Result<Option<String>, String> {
@@ -1293,6 +1370,11 @@ fn set_setting(app: AppHandle, ui: State<Ui>, name: String, value: serde_json::V
         "selected" => {
             let mut c = ui.shared.cfg.lock().unwrap();
             c.selected = value.as_str().map(str::to_string);
+            c.save();
+        }
+        "ours_card_dismissed" => {
+            let mut c = ui.shared.cfg.lock().unwrap();
+            c.ours_card_dismissed = value.as_bool().unwrap_or(true);
             c.save();
         }
         _ => return Err(format!("unknown setting {name}")),

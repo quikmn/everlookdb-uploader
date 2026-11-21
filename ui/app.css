@@ -572,6 +572,69 @@ button { cursor: pointer; }
 }
 .updates-bar p { margin: 0; }
 
+/* welcome card: our addons in one click (new installs, and players with none of ours yet); calm, in the list */
+.welcome {
+  margin: 4px 0 14px;
+  padding: 18px 20px 16px;
+  border-radius: var(--r-m);
+  background: var(--raise);
+  border: 1px solid var(--line-2);
+  box-shadow: inset 0 2px 0 #3b7bd6;
+  display: grid;
+  gap: 12px;
+}
+.wl-head h2 { margin: 0; font-family: var(--display); font-size: 20px; font-weight: 600; }
+.wl-head p { margin: 4px 0 0; color: var(--ink-2); font-size: 13px; max-width: 70ch; }
+.wl-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 2px 18px; }
+.wl-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.wl-label { display: flex; align-items: center; gap: 10px; min-width: 0; cursor: pointer; }
+.wl-row.have .wl-label { cursor: default; }
+.wl-tick { flex: none; width: 16px; height: 16px; display: grid; place-items: center; }
+.wl-tick input { width: 15px; height: 15px; margin: 0; accent-color: var(--gold); cursor: pointer; }
+.wl-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--line-2); }
+.wl-text { display: grid; min-width: 0; }
+.wl-name { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wl-sum { color: var(--ink-3); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wl-label:hover .wl-name { color: #fff; }
+.wl-state { flex: none; font-size: 12.5px; color: var(--ink-3); white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; max-width: 46%; overflow: hidden; text-overflow: ellipsis; }
+.wl-state.ok { color: var(--ink-2); }
+.wl-state.busy { color: var(--sky); }
+.wl-state.bad { color: var(--bad); white-space: normal; }
+.wl-state svg { width: 13px; height: 13px; fill: none; stroke: var(--ok); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.wl-how { margin: 0; color: var(--ink-3); font-size: 12px; max-width: 90ch; }
+.wl-actions { display: flex; gap: 10px; align-items: center; }
+.wl-actions .btn { padding: 8px 18px; }
+.wl-actions .btn.solid[aria-busy='true'] { min-width: 170px; }
+.empty.quiet { padding-top: 18px; }
+.empty.quiet h3 { font-size: 16px; }
+
+/* Get addons: the EverlookDB addons filter, and its Install all missing */
+.filters { display: flex; gap: 8px; margin: 2px 0 10px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 11px 4px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.chip i { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); }
+.chip:hover { color: var(--ink); background: var(--raise); }
+.chip[aria-pressed='true'] { color: var(--ink); background: var(--raise-2); border-color: #39507a; }
+.chip .count { margin-left: 0; }
+.ours-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  border-radius: var(--r-m);
+  background: var(--raise);
+  border: 1px solid var(--line-2);
+}
+.ours-bar p { margin: 0; color: var(--ink-2); }
+.ours-bar strong { color: var(--ink); font-weight: 600; }
+
 .group-title {
   margin: 18px 0 4px;
   font-size: 12px;

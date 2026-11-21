@@ -4,6 +4,7 @@
 
 - The shared auction prices now have a name: the Price Feed. The window's panel and switch say Price Feed, and in game the data addon shows as "EverlookDB Auctions: Price Feed" under EverlookDB Auctions in the addon list (it depends on it, so it never loads alone). It is also a CurseForge addon now that ships empty, for the app to fill (like TradeSkillMaster's AppHelper): the app writes its data over that empty copy and keeps its version, never deletes a file it didn't write, and when CurseForge updates the addon (bringing back the empty copy) the app notices within a minute and writes its data again from what it has. Turning the Price Feed off now leaves the empty copy instead of removing the folder. Its folder is still EverlookDBAuctions_Shared, so nothing needs reinstalling.
 - The log (uploader.log) now has a line for each addon catalog fetch and each automatic update check.
+- Get all of our addons in one click: a new install (or anyone with none of them yet) sees a small card above My addons listing the EverlookDB addons, all ticked, with one Install all button. Each one installs the usual safe way and the card shows how far each one is. "Not now" hides the card for good, and Get addons has an EverlookDB addons filter with "Install all missing" any time later.
 
 ## v0.7.1 (2026-11-21)
 

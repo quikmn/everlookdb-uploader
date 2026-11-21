@@ -134,6 +134,9 @@ pub struct Config {
     /// EverlookDBAuctions_Shared data addon (see shared.rs)
     #[serde(default = "yes")]
     pub shared_prices: bool,
+    /// the player said "Not now" to the welcome card that installs our addons (ours.rs); it never shows again
+    #[serde(default)]
+    pub ours_card_dismissed: bool,
 }
 
 /// A window's place and inner size, in logical pixels.
@@ -201,7 +204,7 @@ pub fn clamp_hours(h: f64) -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true, ours_card_dismissed: false }
     }
 }
 

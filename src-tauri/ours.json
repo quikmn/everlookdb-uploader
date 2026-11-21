@@ -1,0 +1,20 @@
+{
+  "_doc": "Our addons for the welcome card and the EverlookDB addons filter (src/ours.rs). The set is every catalog entry marked \"ours\": true (crates/server/addons.json on everlookdb.com) that has a release for the game, minus \"exclude\". An addon only in the catalog after its first release, so unreleased ones never show. \"addons\" gives the order and the one-line summary the card shows (the catalog's summary is used for one not listed here). The Price Feed (EverlookDBAuctions_Shared) is never installed this way: the app writes it itself while its switch is on.",
+  "addons": [
+    { "id": "github:quikmn/EverlookDB", "summary": "Records loot, NPCs and quests for everlookdb.com." },
+    { "id": "github:quikmn/EverlookDBAuctions", "summary": "Auction prices in tooltips, selling and shopping lists." },
+    { "id": "github:quikmn/EverlookDBCrafting", "summary": "Cheapest skill-up routes and a live crafting guide." },
+    { "id": "github:quikmn/LatticePartyRaidFrames", "summary": "Party and raid frames with click-casting." },
+    { "id": "github:quikmn/Whack", "summary": "Scrolling combat text, the way you want it." },
+    { "id": "github:quikmn/EverlookPets", "summary": "Hunter pet abilities and where to learn the next rank." },
+    { "id": "github:quikmn/EverlookBar", "summary": "Info bars for XP, gold, bags and more, and a clean minimap." },
+    { "id": "github:quikmn/EverlookDBChat", "summary": "Timestamps, class colours, copy chat and chat history." },
+    { "id": "github:quikmn/MouseoverMacros", "summary": "Mouseover macros, more macro slots and a ring menu." },
+    { "id": "github:quikmn/PlayerNotes", "summary": "Notes on players, shown in tooltips and chat." },
+    { "id": "github:quikmn/DisenchantValue", "summary": "An item's disenchant value on its tooltip." }
+  ],
+  "exclude": [
+    { "id": "github:quikmn/CraftColors", "why": "stands down for EverlookDB Crafting, which does recipe colours too" },
+    { "id": "github:quikmn/QuarryCollector", "why": "the Tooltip Collector, a tool for building the database, not for players" }
+  ]
+}

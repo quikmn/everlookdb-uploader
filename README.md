@@ -12,6 +12,8 @@ A small, ad-free addon manager for World of Warcraft (Windows and macOS), and th
   BigWigs, DBM, WeakAuras, ElvUI, Questie, Bartender4 …), filtered to the game you have selected. Forgiving:
   "dbm", "big wigs", "questy" all find what you meant. An addon that isn't in the list installs from its GitHub
   link (Install from GitHub), shown before it installs and then updated like the others.
+- **Our addons in one click.** A new install shows the EverlookDB addons, all ticked, with one Install all button
+  ("Not now" hides it for good); Get addons has an EverlookDB addons filter with Install all missing.
 - **Keeps them updated.** One click to install, update, go back to the previous version or remove. Every hour (or
   as often as you set, up to once a week) it updates what it installed by itself (one switch turns that off), and tells you what changed (v427.8 → v427.9).
 - **Uploads EverlookDB data**, exactly as the EverlookDB Uploader did: see below.
