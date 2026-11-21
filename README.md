@@ -71,13 +71,18 @@ the last upload or when the last upload failed: a failed or refused upload is se
 changes, otherwise after 1, 5, 15 and 30 minutes, then hourly, and when the app starts), and the window shows
 each file's last answer, green, amber or red. Auction files go gzip-compressed. Several accounts are fine. The switch under Uploads (or **Pause uploads** in the tray menu) stops it.
 
-**The Price Feed fetches other players' auction scans and sends nothing about you.** Every 15 minutes, and right after an
-auctions upload, the app asks `https://everlookdb.com/api/v1/auctions` for the list of auction houses and
-`/api/v1/auctions/house/{house}/compact` for the ones you play on (picked on your computer from the realm folders in
-`WTF/Account` and the houses in EverlookDBAuctions.lua; the request names only the house, like `EU-6946-Alliance`),
-with the ETag of the copy it has, so an unchanged house is a short "not modified". Each answer is checked (plain
-numbers only, a bad row is skipped) before it goes into the data addon. The data has no player names. A failed
-check is tried again after 1, 5 and 15 minutes; what was written stays. The window shows each house and how old its
+**The Price Feed fetches other players' auction scans and sends nothing about you.** Once a minute (a few seconds
+early at random, so not every app asks at the same second) the app asks
+`https://everlookdb.com/api/v1/auctions/versions?houses=EU-6946-Alliance,EU-6946-Neutral` for the version of every
+auction house you play on: one answer of a few hundred bytes. Only a house whose version moved (someone uploaded a newer
+scan) is fetched from `/api/v1/auctions/house/{house}/compact`, with the ETag of the copy it has, so a new scan reaches
+the game folder within about a minute and a quiet minute costs almost nothing and writes nothing. The houses you play
+on are picked on your computer from the realm folders in `WTF/Account` and the houses in EverlookDBAuctions.lua
+against the list at `https://everlookdb.com/api/v1/auctions` (asked at start, every 15 minutes and right after an
+auctions upload); the requests name only the houses, like `EU-6946-Alliance`. Each answer is checked (plain numbers
+only, a bad row is skipped) before it goes into the data addon. The data has no player names. After a failed check
+(no connection, the server busy or failing) it waits 2, 4, 8, then 15 minutes, or as long as the server asks, then
+goes back to once a minute; what was written stays. The window shows each house and how old its
 scan is.
 
 **Problem reports are sent only when you click.** "Send error logs to the developer" (next to an error) or "Report a

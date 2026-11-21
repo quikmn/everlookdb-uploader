@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The Price Feed checks for new scans once a minute instead of every 15 minutes, so a scan someone uploads is in your game folder within about a minute. A check is one tiny request for all your auction houses at once ("anything new?"); only a house with a newer scan is downloaded, and nothing is written when nothing changed. After errors it waits longer (2, 4, 8, then 15 minutes, or what the server asks) and then goes back to once a minute. The log has a line when something new arrives and a short summary every 15 minutes otherwise.
 - Price Feed: finds your auction houses again after today's WoW Forever client update, which stopped telling addons the realm's name: the houses are now also matched by the realm ID in your saved scans.
 - An auctions file whose scans the server refused for what they say (no realm, too old) is no longer sent again every hour and logged as a new error each time: it's sent again when the file changes, which is when the game has saved something new. A file the server couldn't read at all is still tried hourly.
 

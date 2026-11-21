@@ -4,9 +4,13 @@
 //
 // Which houses: the realms in WTF/Account/*/ (a folder per realm the player has characters on) and the houses the
 // Auctions addon saved prices for (EverlookDBAuctions.lua, "<realm>-<side>"), matched by realm name and side to
-// GET /api/v1/auctions. Each house's GET /api/v1/auctions/house/{key}/compact is asked every 15 minutes and right
-// after each auctions upload, with its ETag, so an unchanged house costs a 304. Errors back off (1, 5, 15, 30,
-// 60 minutes) and never touch what is already written; the last good copy of each house is kept in the cache folder.
+// GET /api/v1/auctions (asked at start, every 15 minutes and right after each auctions upload). Once a minute (up to
+// 5 s early at random, so players' checks spread out) one GET /api/v1/auctions/versions?houses=... asks every house's
+// version in a few hundred bytes; only a house whose version moved is fetched (GET /api/v1/auctions/house/{key}/compact,
+// with its ETag as a second guard, so an unchanged one costs a 304). An older server without /versions: each house's
+// compact is asked with its ETag instead. Nothing is written unless a house changed. Errors (no connection, 429, 5xx)
+// back off 2, 4, 8, then 15 minutes, or what the server's Retry-After asks, then it is once a minute again; they never
+// touch what is already written; the last good copy of each house is kept in the cache folder.
 //
 // What is written: only the folder EverlookDBAuctions_Shared, nothing else in the game folder. That folder is also a
 // CurseForge addon ("EverlookDB Auctions: Price Feed", D:\Dev\EverlookDBAuctions_Shared) that ships empty, like
@@ -34,7 +38,6 @@ use std::time::{Duration, Instant};
 pub const FOLDER: &str = "EverlookDBAuctions_Shared";
 /// The addon that reads it; nothing is written without it.
 const READER: &str = "EverlookDBAuctions";
-const EVERY: Duration = Duration::from_secs(15 * 60);
 /// The Interface version when the Auctions addon's .toc doesn't say one.
 const INTERFACE: u32 = 16001;
 const SIDES: [&str; 3] = ["Alliance", "Horde", "Neutral"];
@@ -439,41 +442,173 @@ enum Got {
     Gone,
 }
 
-fn get(http: &reqwest::blocking::Client, url: &str, etag: Option<&str>) -> Result<(u16, Option<String>, Vec<u8>), String> {
+/// A failed request: what the window says, and how long the server asked us to wait (its Retry-After).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fail {
+    pub msg: String,
+    pub retry_after: Option<Duration>,
+    /// the server is busy, failing or unreachable (429, 5xx, no connection): ask nothing more this round
+    pub stop: bool,
+}
+
+impl Fail {
+    fn new(msg: impl Into<String>) -> Fail {
+        Fail { msg: msg.into(), retry_after: None, stop: false }
+    }
+}
+
+struct Answer {
+    code: u16,
+    etag: Option<String>,
+    retry_after: Option<Duration>,
+    body: Vec<u8>,
+}
+
+/// A Retry-After header: seconds, or an HTTP date.
+pub fn retry_after_of(v: &str, now: i64) -> Option<Duration> {
+    let v = v.trim();
+    if let Ok(s) = v.parse::<u64>() {
+        return Some(Duration::from_secs(s));
+    }
+    let t = chrono::DateTime::parse_from_rfc2822(v).ok()?.timestamp();
+    Some(Duration::from_secs((t - now).max(0) as u64))
+}
+
+fn get(http: &reqwest::blocking::Client, url: &str, etag: Option<&str>) -> Result<Answer, Fail> {
     let mut req = http.get(url).header("Accept-Encoding", "gzip");
     if let Some(t) = etag {
         req = req.header("If-None-Match", t);
     }
-    let resp = req.send().map_err(|e| if e.is_timeout() { "no answer".to_string() } else { "can't reach everlookdb.com".to_string() })?;
+    let resp = req.send().map_err(|e| Fail {
+        msg: if e.is_timeout() { "no answer".to_string() } else { "can't reach everlookdb.com".to_string() },
+        retry_after: None,
+        stop: true,
+    })?;
     let code = resp.status().as_u16();
     let tag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| retry_after_of(v, unix_now()));
+    if code == 304 {
+        return Ok(Answer { code, etag: tag, retry_after, body: vec![] });
+    }
     let gz = resp.headers().get("content-encoding").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("gzip"));
     let mut raw = vec![];
-    resp.take(MAX_BODY + 1).read_to_end(&mut raw).map_err(|_| "the answer was cut off".to_string())?;
+    resp.take(MAX_BODY + 1).read_to_end(&mut raw).map_err(|_| Fail::new("the answer was cut off"))?;
     if raw.len() as u64 > MAX_BODY {
-        return Err("the answer is too large".into());
+        return Err(Fail::new("the answer is too large"));
     }
     let body = if gz {
         let mut out = vec![];
-        flate2::read::GzDecoder::new(&raw[..]).take(MAX_BODY * 4).read_to_end(&mut out).map_err(|_| "a bad answer".to_string())?;
+        flate2::read::GzDecoder::new(&raw[..]).take(MAX_BODY * 4).read_to_end(&mut out).map_err(|_| Fail::new("a bad answer"))?;
         out
     } else {
         raw
     };
-    Ok((code, tag, body))
+    Ok(Answer { code, etag: tag, retry_after, body })
 }
 
-fn fetch_house(http: &reqwest::blocking::Client, server: &str, key: &str, etag: Option<&str>, now: i64) -> Result<Got, String> {
-    let (code, tag, body) = get(http, &format!("{server}/api/v1/auctions/house/{key}/compact"), etag)?;
-    match code {
+/// An answer that isn't one we can use: 429 and 5xx stop the round and carry the server's Retry-After.
+fn fail_of(a: &Answer) -> Fail {
+    let msg = if a.code == 429 { "the server is busy".to_string() } else { format!("the server answered {}", a.code) };
+    Fail { msg, retry_after: a.retry_after, stop: a.code == 429 || a.code >= 500 }
+}
+
+fn fetch_house(http: &reqwest::blocking::Client, server: &str, key: &str, etag: Option<&str>, now: i64) -> Result<Got, Fail> {
+    let a = get(http, &format!("{server}/api/v1/auctions/house/{key}/compact"), etag)?;
+    match a.code {
         304 => Ok(Got::Same),
         404 => Ok(Got::Gone),
         200 => {
-            let v: Value = serde_json::from_slice(&body).map_err(|_| "a bad answer".to_string())?;
-            Ok(Got::New(parse(&v, key, now)?, tag))
+            let v: Value = serde_json::from_slice(&a.body).map_err(|_| Fail::new("a bad answer"))?;
+            Ok(Got::New(parse(&v, key, now).map_err(Fail::new)?, a.etag))
         }
-        429 => Err("the server is busy".into()),
-        c => Err(format!("the server answered {c}")),
+        _ => Err(fail_of(&a)),
+    }
+}
+
+/// GET /api/v1/auctions/versions?houses=a,b: every house's version in one small answer (the name in its compact
+/// ETag; None: no scans). Ok(None): the server doesn't have it yet (an older one), so each house is asked with its
+/// ETag instead.
+fn fetch_versions(http: &reqwest::blocking::Client, server: &str, keys: &[String]) -> Result<Option<BTreeMap<String, Option<String>>>, Fail> {
+    let mut sorted = keys.to_vec();
+    sorted.sort();
+    let a = get(http, &format!("{server}/api/v1/auctions/versions?houses={}", sorted.join(",")), None)?;
+    match a.code {
+        200 => {
+            let v: Value = serde_json::from_slice(&a.body).map_err(|_| Fail::new("a bad answer"))?;
+            Ok(Some(versions_of(&v, keys)))
+        }
+        400 | 404 | 405 => Ok(None),
+        _ => Err(fail_of(&a)),
+    }
+}
+
+/// The versions answer for these keys (missing or not a plain string: None).
+pub fn versions_of(v: &Value, keys: &[String]) -> BTreeMap<String, Option<String>> {
+    keys.iter().map(|k| (k.clone(), v[k.as_str()].as_str().filter(|s| s.len() <= 100).map(str::to_string))).collect()
+}
+
+/// The version an ETag names: W/"c1-1795227761-34-20778" -> c1-1795227761-34-20778.
+pub fn tag_version(etag: &str) -> &str {
+    etag.trim().trim_start_matches("W/").trim_matches('"')
+}
+
+/// The houses to fetch: those whose version moved from the copy we have, that we have no copy (or no ETag) of, and
+/// those the server no longer has scans of (their fetch says 404 and they go).
+pub fn moved(versions: &BTreeMap<String, Option<String>>, have: &BTreeMap<String, (House, Option<String>)>) -> BTreeSet<String> {
+    versions
+        .iter()
+        .filter(|(k, v)| match (v, have.get(*k)) {
+            (None, None) => false,
+            (None, Some(_)) | (Some(_), None) => true,
+            (Some(v), Some((_, tag))) => tag.as_deref().map(tag_version) != Some(v.as_str()),
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// When to look
+
+/// How often the Price Feed checks for new scans: once a minute, up to JITTER early at random, so the players'
+/// checks spread out instead of all reaching the server in the same second.
+pub const EVERY: Duration = Duration::from_secs(60);
+const JITTER: Duration = Duration::from_secs(5);
+/// The longest wait after errors: 2, 4, 8, then 15 minutes (a Retry-After from the server can ask for up to an hour).
+const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
+/// How often the list of houses (GET /api/v1/auctions) is asked again; also right after each auctions upload.
+const LIST_EVERY: Duration = Duration::from_secs(15 * 60);
+/// How often unchanged checks are summed up in the log (they write nothing else).
+const QUIET_LOG: Duration = Duration::from_secs(15 * 60);
+
+/// The wait before the next check. `failures`: errors in a row (0 after a success); `retry_after`: what the server
+/// asked for; `jitter`: a random part, at most JITTER (taken off the minute, added to a backoff).
+pub fn next_wait(failures: u32, retry_after: Option<Duration>, jitter: Duration) -> Duration {
+    let jitter = jitter.min(JITTER);
+    if failures == 0 {
+        return EVERY - jitter;
+    }
+    let back = Duration::from_secs(60u64 << failures.min(5)).min(MAX_BACKOFF);
+    let wait = match retry_after {
+        Some(r) => back.max(r.min(MAX_RETRY_AFTER)),
+        None => back,
+    };
+    wait + jitter
+}
+
+/// A random 0..=JITTER.
+fn jitter() -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    Duration::from_millis(h.finish() % (JITTER.as_millis() as u64 + 1))
+}
+
+fn words(d: Duration) -> String {
+    if d.as_secs() < 120 {
+        format!("{} s", d.as_secs())
+    } else {
+        format!("{} min", d.as_secs() / 60)
     }
 }
 
@@ -509,6 +644,18 @@ pub struct Poller {
     failures: u32,
     /// what the last write left in the folder, to notice it was replaced
     last: Option<Written>,
+    /// the houses the player uses, from the last list, and when that was asked
+    keys: Vec<String>,
+    listed: Option<Instant>,
+    /// ask the list again at the next check (after an upload, or the setting changed)
+    relist: bool,
+    /// an older server without /versions: each house is asked with its ETag until then
+    no_versions_until: Option<Instant>,
+    /// not before this (the server's Retry-After), even when poked
+    hold_until: Option<Instant>,
+    /// unchanged checks since the last summary line in the log, and when that was
+    quiet: u32,
+    quiet_logged: Option<Instant>,
 }
 
 struct Written {
@@ -542,7 +689,20 @@ impl Poller {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("http client");
-        Poller { http, server: server.trim_end_matches('/').to_string(), houses: BTreeMap::new(), failures: 0, last: None }
+        Poller {
+            http,
+            server: server.trim_end_matches('/').to_string(),
+            houses: BTreeMap::new(),
+            failures: 0,
+            last: None,
+            keys: vec![],
+            listed: None,
+            relist: false,
+            no_versions_until: None,
+            hold_until: None,
+            quiet: 0,
+            quiet_logged: None,
+        }
     }
 
     /// The cheap check, about once a minute: when the folder no longer holds what the app last wrote (its .toc
@@ -566,8 +726,27 @@ impl Poller {
         }
     }
 
-    /// One refresh of every wanted house for the `_forever_` folder; writes the data addon. Returns the view and
-    /// when to look again.
+    /// The houses we know of when the list can't be had: the last list, those in memory, else the cached ones.
+    fn known_keys(&self) -> Vec<String> {
+        if !self.keys.is_empty() {
+            return self.keys.clone();
+        }
+        let mut k: Vec<String> = self.houses.keys().cloned().collect();
+        if k.is_empty() {
+            k = std::fs::read_dir(config::cache_dir().join("shared"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".json").map(str::to_string))
+                .filter(|k| key_ok(k))
+                .collect();
+        }
+        k
+    }
+
+    /// One check of every wanted house for the `_forever_` folder: one small GET /api/v1/auctions/versions for all of
+    /// them, then the compact body (with its ETag) only of a house whose version moved; the data addon is written
+    /// only when a house changed. Returns the view and when to look again.
     pub fn refresh(&mut self, forever: &Path, on: bool) -> (View, Duration) {
         let addons = forever.join("Interface").join("AddOns");
         if !on {
@@ -583,34 +762,34 @@ impl Poller {
             return (View { on, houses: vec![], note: Some("Install EverlookDB Auctions to use them".into()) }, EVERY);
         }
         let now = unix_now();
-        let want = wanted(forever);
-        let mut error: Option<String> = None;
-        let keys: Vec<String> = match get(&self.http, &format!("{}/api/v1/auctions", self.server), None) {
-            Ok((200, _, body)) => match serde_json::from_slice::<Value>(&body) {
-                Ok(v) => pick(&v, &want),
-                Err(_) => {
-                    error = Some("a bad answer".into());
-                    self.houses.keys().cloned().collect()
+        let mut error: Option<Fail> = None;
+        // the list of houses: at the first check, every LIST_EVERY and after an upload
+        let list_due = self.relist || self.listed.is_none_or(|t| t.elapsed() >= LIST_EVERY);
+        let keys: Vec<String> = if !list_due {
+            self.keys.clone()
+        } else {
+            match get(&self.http, &format!("{}/api/v1/auctions", self.server), None) {
+                Ok(a) if a.code == 200 => match serde_json::from_slice::<Value>(&a.body) {
+                    Ok(v) => {
+                        self.keys = pick(&v, &wanted(forever));
+                        self.listed = Some(Instant::now());
+                        self.relist = false;
+                        self.keys.clone()
+                    }
+                    Err(_) => {
+                        error = Some(Fail::new("a bad answer"));
+                        self.known_keys()
+                    }
+                },
+                Ok(a) => {
+                    error = Some(fail_of(&a));
+                    self.known_keys()
                 }
-            },
-            Ok((c, _, _)) => {
-                error = Some(format!("the server answered {c}"));
-                self.houses.keys().cloned().collect()
-            }
-            Err(e) => {
-                error = Some(e);
-                // offline: keep writing what we have
-                let mut k: Vec<String> = self.houses.keys().cloned().collect();
-                if k.is_empty() {
-                    k = std::fs::read_dir(config::cache_dir().join("shared"))
-                        .into_iter()
-                        .flatten()
-                        .flatten()
-                        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".json").map(str::to_string))
-                        .filter(|k| key_ok(k))
-                        .collect();
+                Err(e) => {
+                    error = Some(e);
+                    // offline: keep writing what we have
+                    self.known_keys()
                 }
-                k
             }
         };
         self.houses.retain(|k, _| keys.contains(k));
@@ -620,9 +799,36 @@ impl Poller {
                     self.houses.insert(key.clone(), c);
                 }
             }
-            if error.is_some() && self.houses.contains_key(key) {
-                continue;
+        }
+        // which houses to fetch: those whose version moved (every house, each with its ETag, on an older server)
+        let ask: BTreeSet<String> = match &error {
+            None if keys.is_empty() => BTreeSet::new(),
+            None => {
+                let try_versions = self.no_versions_until.is_none_or(|t| Instant::now() >= t);
+                match if try_versions { fetch_versions(&self.http, &self.server, &keys) } else { Ok(None) } {
+                    Ok(Some(v)) => {
+                        self.no_versions_until = None;
+                        moved(&v, &self.houses)
+                    }
+                    Ok(None) => {
+                        if try_versions {
+                            config::log("price feed: the server has no versions check yet; asking each house with its ETag");
+                            self.no_versions_until = Some(Instant::now() + LIST_EVERY);
+                        }
+                        keys.iter().cloned().collect()
+                    }
+                    Err(e) => {
+                        error = Some(e);
+                        BTreeSet::new()
+                    }
+                }
             }
+            // the list failed: only houses we have nothing of, and only when the server isn't the problem
+            Some(e) if !e.stop => keys.iter().filter(|k| !self.houses.contains_key(*k)).cloned().collect(),
+            Some(_) => BTreeSet::new(),
+        };
+        let mut changed = false;
+        for key in keys.iter().filter(|k| ask.contains(*k)) {
             let etag = self.houses.get(key).and_then(|h| h.1.clone());
             match fetch_house(&self.http, &self.server, key, etag.as_deref(), now) {
                 Ok(Got::New(h, tag)) => {
@@ -630,46 +836,72 @@ impl Poller {
                     // the checked house, for the next start (a 304 needs it)
                     save_cached(key, &body_of(&h), tag.as_deref());
                     self.houses.insert(key.clone(), (h, tag));
+                    changed = true;
                 }
                 Ok(Got::Same) => {}
                 Ok(Got::Gone) => {
-                    self.houses.remove(key);
+                    changed |= self.houses.remove(key).is_some();
                 }
                 Err(e) => {
-                    if error.is_none() {
-                        error = Some(e);
+                    let stop = e.stop;
+                    error.get_or_insert(e);
+                    if stop {
+                        break;
                     }
                 }
             }
         }
         let list: Vec<&House> = keys.iter().filter_map(|k| self.houses.get(k).map(|h| &h.0)).collect();
-        let write = if list.is_empty() {
+        let names: Vec<String> = list.iter().map(|h| h.key.clone()).collect();
+        // nothing moved since the last write: nothing is written, not even compared (check() puts back a folder an
+        // addon update replaced)
+        let unchanged = !changed && self.last.as_ref().is_some_and(|w| w.keys == names);
+        let write = if unchanged {
+            Ok(false)
+        } else if list.is_empty() {
             self.last = None;
             write_stub(&addons)
         } else {
             let w = write_addon(&addons, &list, now);
-            self.last = w.is_ok().then(|| Written { toc: read_toc(&addons), keys: list.iter().map(|h| h.key.clone()).collect() });
+            self.last = w.is_ok().then(|| Written { toc: read_toc(&addons), keys: names.clone() });
             w
         };
-        if let Err(e) = write {
-            config::log(&format!("price feed: can't write {FOLDER}: {e}"));
-            error.get_or_insert_with(|| format!("can't write the data addon ({e})"));
-        } else if write.is_ok_and(|c| c) {
-            config::log(&format!("price feed: wrote {FOLDER} ({} houses)", list.len()));
+        let mut wrote = false;
+        match write {
+            Err(e) => {
+                config::log(&format!("price feed: can't write {FOLDER}: {e}"));
+                error.get_or_insert_with(|| Fail::new(format!("can't write the data addon ({e})")));
+            }
+            Ok(true) => {
+                wrote = true;
+                config::log(&format!("price feed: wrote {FOLDER} ({} houses)", list.len()));
+            }
+            Ok(false) => {}
         }
         let houses = list.iter().map(|h| HouseView { key: h.key.clone(), realm: h.realm.clone(), side: h.side.clone(), at: h.at }).collect();
         let (wait, note) = match error {
             Some(e) => {
                 self.failures += 1;
-                let wait = crate::worker::backoff(self.failures).min(EVERY);
-                config::log(&format!("price feed: {e}; trying again in {} min", wait.as_secs() / 60));
-                crate::report::note_error("price feed", &format!("Price Feed: {e}"));
-                (wait, Some(format!("Last check failed: {e}")))
+                let wait = next_wait(self.failures, e.retry_after, jitter());
+                self.hold_until = e.retry_after.map(|r| Instant::now() + r.min(MAX_RETRY_AFTER));
+                config::log(&format!("price feed: {}; trying again in {}", e.msg, words(wait)));
+                crate::report::note_error("price feed", &format!("Price Feed: {}", e.msg));
+                (wait, Some(format!("Last check failed: {}", e.msg)))
             }
             None => {
                 self.failures = 0;
+                self.hold_until = None;
+                if !changed && !wrote {
+                    // an unchanged check logs nothing but a summary: the first one, then one every QUIET_LOG
+                    self.quiet += 1;
+                    if self.quiet_logged.is_none_or(|t| t.elapsed() >= QUIET_LOG) {
+                        config::log(&format!("price feed: no new scans ({} checks of {} houses since the last summary; the next in 15 min)", self.quiet, list.len()));
+                        self.quiet = 0;
+                        self.quiet_logged = Some(Instant::now());
+                    }
+                }
                 let note = list.is_empty().then(|| "No one has uploaded a scan of your auction houses yet".to_string());
-                (EVERY, note)
+                (next_wait(0, None, jitter()), note)
             }
         };
         (View { on, houses, note }, wait)
@@ -706,7 +938,8 @@ fn body_of(h: &House) -> Value {
         "at": h.at, "auctions": h.auctions, "first_day": h.first_day, "rows": rows, "lows": lows })
 }
 
-/// The shared-prices thread: refreshes at start, every 15 minutes (sooner after an error), and when poked.
+/// The shared-prices thread: checks at start, about once a minute (later after errors: 2, 4, 8, 15 minutes, or what
+/// the server's Retry-After asks), and when poked (after an auctions upload).
 pub fn run(cfg: impl Fn() -> (Option<PathBuf>, bool), server: String, mut report: impl FnMut(&View)) {
     let (tx, rx): (Sender<()>, Receiver<()>) = std::sync::mpsc::channel();
     let _ = POKE.set(Mutex::new(tx));
@@ -727,7 +960,9 @@ pub fn run(cfg: impl Fn() -> (Option<PathBuf>, bool), server: String, mut report
                 // an upload may be followed by more within seconds: take them as one
                 std::thread::sleep(Duration::from_secs(2));
                 while rx.try_recv().is_ok() {}
-                next = Instant::now();
+                // the upload may have brought a new house: ask the list too; never sooner than a Retry-After
+                p.relist = true;
+                next = p.hold_until.map_or_else(Instant::now, |t| t.max(Instant::now()));
             }
             Err(RecvTimeoutError::Timeout) => {
                 // about once a minute: put the data back if an addon update replaced the folder
@@ -957,5 +1192,176 @@ mod tests {
             assert!(!line.contains('\\'));
         }
         assert!(lua.contains("realm = \"CAMWOW EU5 Realm 4 PvP\", realmID = 4, side = \"Alliance\", at = 1795000000"));
+    }
+
+    #[test]
+    fn checks_once_a_minute_and_backs_off_on_errors() {
+        // a minute, up to 5 s early at random
+        assert_eq!(next_wait(0, None, Duration::ZERO), Duration::from_secs(60));
+        assert_eq!(next_wait(0, None, Duration::from_secs(5)), Duration::from_secs(55));
+        assert_eq!(next_wait(0, None, Duration::from_secs(60)), Duration::from_secs(55), "jitter is capped");
+        for _ in 0..50 {
+            let w = next_wait(0, None, jitter());
+            assert!((Duration::from_secs(55)..=Duration::from_secs(60)).contains(&w), "{w:?}");
+        }
+        // errors: 2, 4, 8, then 15 minutes at most (plus the jitter)
+        let mins = |n: u32| next_wait(n, None, Duration::ZERO).as_secs() / 60;
+        assert_eq!((mins(1), mins(2), mins(3), mins(4), mins(5), mins(1000)), (2, 4, 8, 15, 15, 15));
+        assert_eq!(next_wait(1, None, Duration::from_secs(3)), Duration::from_secs(123));
+        // Retry-After is honoured: never sooner, up to an hour
+        assert_eq!(next_wait(1, Some(Duration::from_secs(600)), Duration::ZERO), Duration::from_secs(600));
+        assert_eq!(next_wait(1, Some(Duration::from_secs(10)), Duration::ZERO), Duration::from_secs(120), "the backoff is longer");
+        assert_eq!(next_wait(4, Some(Duration::from_secs(7200)), Duration::ZERO), Duration::from_secs(3600));
+        assert_eq!(retry_after_of("120", 0), Some(Duration::from_secs(120)));
+        assert_eq!(retry_after_of("Thu, 01 Jan 1970 00:02:00 GMT", 60), Some(Duration::from_secs(60)));
+        assert_eq!(retry_after_of("soon", 0), None);
+    }
+
+    #[test]
+    fn fetches_only_houses_whose_version_moved() {
+        let h = parse(&body(1_795_000_000), "EU-4-Alliance", 1_795_000_100).unwrap();
+        let mut have = BTreeMap::new();
+        have.insert("EU-4-Alliance".to_string(), (h.clone(), Some("W/\"c1-1795000000-3-20777\"".to_string())));
+        let mut h5 = h.clone();
+        h5.key = "EU-5-Horde".into();
+        have.insert("EU-5-Horde".to_string(), (h5, Some("W/\"c1-1-1-1\"".to_string())));
+        let keys: Vec<String> = ["EU-4-Alliance", "EU-5-Horde", "EU-6-Neutral", "EU-7-Horde"].iter().map(|s| s.to_string()).collect();
+        let v = versions_of(&json!({ "EU-4-Alliance": "c1-1795000000-3-20777", "EU-5-Horde": "c1-1795000600-2-20777", "EU-6-Neutral": "c1-9-1-1", "EU-7-Horde": null, "EU-8-Horde": "x" }), &keys);
+        assert_eq!(v.len(), 4, "only the houses asked for");
+        assert_eq!(moved(&v, &have), set(&["EU-5-Horde", "EU-6-Neutral"]), "moved, and new; not unchanged or never scanned");
+        // a house we have that the server no longer has: fetched, so its 404 removes it
+        let v = versions_of(&json!({ "EU-4-Alliance": null }), &keys[..1]);
+        assert_eq!(moved(&v, &have), set(&["EU-4-Alliance"]));
+        assert_eq!(tag_version("W/\"c1-1-2-3\""), "c1-1-2-3");
+    }
+
+    /// A small everlookdb.com: the house list, /versions (or none, like an older server), one house's compact with
+    /// ETag and 304, or 429 with Retry-After. Every request is logged ("path", "+etag" when it sent If-None-Match).
+    struct Fake {
+        versions: bool,
+        etag: String,
+        body: Vec<u8>,
+        busy: Option<u64>,
+        log: Vec<String>,
+    }
+
+    fn serve(state: std::sync::Arc<Mutex<Fake>>) -> String {
+        use std::io::Write;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let mut s = s;
+                let mut buf = vec![];
+                let mut b = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut b) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&b[..n]),
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                let inm = req.lines().find(|l| l.to_ascii_lowercase().starts_with("if-none-match:")).map(|l| l[14..].trim().to_string());
+                let mut f = state.lock().unwrap();
+                f.log.push(format!("{path}{}", if inm.is_some() { "+etag" } else { "" }));
+                let (code, extra, body): (u16, String, Vec<u8>) = if let Some(secs) = f.busy {
+                    (429, format!("Retry-After: {secs}\r\n"), b"{}".to_vec())
+                } else if path == "/api/v1/auctions" {
+                    let list = json!({ "houses": [{ "key": "EU-4-Alliance", "realm": "CAMWOW EU5 Realm 4 PvP", "realm_id": 4, "side": "Alliance" }] });
+                    (200, String::new(), list.to_string().into_bytes())
+                } else if path == "/api/v1/auctions/versions?houses=EU-4-Alliance" && f.versions {
+                    (200, String::new(), json!({ "EU-4-Alliance": tag_version(&f.etag) }).to_string().into_bytes())
+                } else if path == "/api/v1/auctions/house/EU-4-Alliance/compact" {
+                    if inm.as_deref() == Some(f.etag.as_str()) {
+                        (304, format!("ETag: {}\r\n", f.etag), vec![])
+                    } else {
+                        (200, format!("ETag: {}\r\n", f.etag), f.body.clone())
+                    }
+                } else {
+                    (404, String::new(), vec![])
+                };
+                let _ = write!(s, "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n", body.len());
+                let _ = s.write_all(&body);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The modified times of every file in the folder: the same after a check means nothing was written.
+    fn stamps(dir: &Path) -> Vec<(String, std::time::SystemTime)> {
+        let mut v: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().unwrap().modified().unwrap())).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_minute_check_asks_versions_and_writes_nothing_when_unchanged() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (root, addons) = game("feed");
+        std::fs::create_dir_all(root.join("WTF").join("Account").join("ACC").join("CAMWOW EU5 Realm 4 PvP")).unwrap();
+        let _ = std::fs::remove_file(cache_path("EU-4-Alliance"));
+        let body1 = body(1_795_000_000).to_string().into_bytes();
+        let fake = std::sync::Arc::new(Mutex::new(Fake { versions: true, etag: "W/\"c1-1795000000-1-20777\"".into(), body: body1, busy: None, log: vec![] }));
+        let mut p = Poller::new(&serve(fake.clone()));
+        let take_log = || std::mem::take(&mut fake.lock().unwrap().log);
+        let dir = addons.join(FOLDER);
+        let minute = Duration::from_secs(55)..=Duration::from_secs(60);
+
+        // the first check: the list, the versions, the house; written
+        let (view, wait) = p.refresh(&root, true);
+        assert_eq!(take_log(), ["/api/v1/auctions", "/api/v1/auctions/versions?houses=EU-4-Alliance", "/api/v1/auctions/house/EU-4-Alliance/compact"]);
+        assert!(minute.contains(&wait), "{wait:?}");
+        assert_eq!((view.houses.len(), view.note.clone()), (1, None));
+        assert!(dir.join("EU-4-Alliance.lua").is_file());
+        let before = stamps(&dir);
+        std::thread::sleep(Duration::from_millis(30));
+
+        // the next minute: one versions request, nothing fetched, nothing written
+        let (view, wait) = p.refresh(&root, true);
+        assert_eq!(take_log(), ["/api/v1/auctions/versions?houses=EU-4-Alliance"]);
+        assert!(minute.contains(&wait) && view.houses.len() == 1);
+        assert_eq!(stamps(&dir), before, "an unchanged check writes nothing");
+
+        // an older server without /versions: the house with its ETag, a 304, and still nothing written
+        fake.lock().unwrap().versions = false;
+        p.refresh(&root, true);
+        assert_eq!(take_log(), ["/api/v1/auctions/versions?houses=EU-4-Alliance", "/api/v1/auctions/house/EU-4-Alliance/compact+etag"]);
+        let (_, wait) = p.refresh(&root, true);
+        assert_eq!(take_log(), ["/api/v1/auctions/house/EU-4-Alliance/compact+etag"], "versions aren't asked again for a while");
+        assert!(minute.contains(&wait));
+        assert_eq!(stamps(&dir), before, "a 304 writes nothing");
+
+        // busy: 429 with Retry-After; the backoff, nothing written, the data kept
+        fake.lock().unwrap().busy = Some(300);
+        let (view, wait) = p.refresh(&root, true);
+        assert_eq!(take_log().len(), 1, "one request, then it stops");
+        assert!(wait >= Duration::from_secs(300) && wait <= Duration::from_secs(305), "{wait:?}");
+        assert!(view.note.as_deref().is_some_and(|n| n.contains("busy")) && view.houses.len() == 1);
+        assert!(p.hold_until.is_some());
+        fake.lock().unwrap().busy = Some(1);
+        let (_, wait) = p.refresh(&root, true);
+        take_log();
+        assert_eq!(wait.as_secs() / 60, 4, "the second error in a row: 4 minutes");
+        assert_eq!(stamps(&dir), before);
+
+        // back: a new scan; the versions moved, the house is fetched and written, and it is once a minute again
+        {
+            let mut f = fake.lock().unwrap();
+            f.busy = None;
+            f.versions = true;
+            f.etag = "W/\"c1-1795000600-2-20777\"".into();
+            f.body = body(1_795_000_600).to_string().into_bytes();
+        }
+        p.no_versions_until = None;
+        let (view, wait) = p.refresh(&root, true);
+        assert_eq!(take_log(), ["/api/v1/auctions/versions?houses=EU-4-Alliance", "/api/v1/auctions/house/EU-4-Alliance/compact+etag"]);
+        assert!(minute.contains(&wait), "{wait:?}");
+        assert_eq!((view.houses[0].at, view.note), (1_795_000_600, None));
+        assert!(p.hold_until.is_none() && p.failures == 0);
+        assert!(std::fs::read_to_string(dir.join("EU-4-Alliance.lua")).unwrap().contains("at = 1795000600"));
+        assert_ne!(stamps(&dir), before);
+        let _ = std::fs::remove_file(cache_path("EU-4-Alliance"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
