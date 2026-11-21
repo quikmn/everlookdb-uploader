@@ -429,6 +429,12 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
         .build(app)?;
 
     let (tx, rx) = channel();
+    // read the settings once, before app.manage: a lock taken inside that one statement is held until it ends, so a
+    // second lock in it waits on the first forever (0.7.0 hung at every start that way)
+    let (giveaway_view, shared_on) = {
+        let c = shared.cfg.lock().unwrap();
+        (giveaway::view_if_shown(&c.receipts), c.shared_prices)
+    };
     app.manage(Ui {
         status,
         folder,
@@ -440,10 +446,10 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
             line: "Starting…".into(),
             kind: "idle",
             paused,
-            giveaway: giveaway::view_if_shown(&shared.cfg.lock().unwrap().receipts),
+            giveaway: giveaway_view,
             ..Default::default()
         }),
-        shared_view: Mutex::new(shared::View { on: shared.cfg.lock().unwrap().shared_prices, ..Default::default() }),
+        shared_view: Mutex::new(shared::View { on: shared_on, ..Default::default() }),
         catalog: Mutex::new(CatalogState::default()),
         icon_files: Mutex::new(HashMap::new()),
         github_seen: Mutex::new(HashMap::new()),
