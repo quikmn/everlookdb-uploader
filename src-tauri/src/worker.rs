@@ -301,7 +301,8 @@ fn summary(v: &Value) -> String {
 pub enum Outcome {
     /// the server took it (all or part of it)
     Sent(Answer),
-    /// 4xx: the server refused it; tried again every hour, and at once when the file changes
+    /// 4xx: the server refused it; tried again at once when the file changes, and every hour unless
+    /// `refused_for_good` (its scans were read and refused for what is in them)
     Refused { code: u16, message: String, scans: Vec<Scan> },
     /// 429: wait this long
     Busy(Duration),
@@ -322,6 +323,13 @@ pub fn backoff(failures: u32) -> Duration {
 
 /// A refused file (4xx) is sent again hourly: the server may have been fixed.
 pub const REFUSED_RETRY: Duration = Duration::from_secs(60 * 60);
+
+/// A refusal sending the same file again won't change: the server read its scans and refused each for what it
+/// says (no realm, too old, prices unlike the last scan). Sent again only when the file changes (and once when the
+/// app starts), not every hour.
+pub fn refused_for_good(code: u16, scans: &[Scan]) -> bool {
+    code == 422 && !scans.is_empty()
+}
 
 /// The wait after a 429: what Retry-After says, kept between 5 seconds and an hour.
 pub fn busy_wait(retry_after: Option<u64>) -> Duration {
@@ -598,17 +606,19 @@ impl Watcher {
                 }
                 Outcome::Refused { code, message, scans } => {
                     let failures = failures + 1;
-                    t.retry_at = Some(Instant::now() + REFUSED_RETRY);
+                    let for_good = refused_for_good(code, &scans);
+                    t.retry_at = if for_good { None } else { Some(Instant::now() + REFUSED_RETRY) };
                     let next = at + REFUSED_RETRY.as_secs() as i64;
                     let state = FileState {
                         level: "failed".into(),
                         headline: format!("Not accepted: {message}"),
                         details: rejected_lines(&scans),
                         at,
-                        next_retry: Some(next),
+                        next_retry: if for_good { None } else { Some(next) },
                         failures,
                     };
-                    config::log(&format!("{label} ({}) not accepted ({code}): {message}; trying again at {}", file_name(f), clock(next)));
+                    let when = if for_good { "sent again when the file changes".to_string() } else { format!("trying again at {}", clock(next)) };
+                    config::log(&format!("{label} ({}) not accepted ({code}): {message}; {when}", file_name(f)));
                     crate::report::note_error("upload", &format!("{label} ({}) not accepted ({code}): {message}", file_name(f)));
                     for s in &scans {
                         config::log(&scan_log(s));
@@ -824,6 +834,11 @@ mod tests {
         assert_eq!(mins, vec![1, 5, 15, 30, 60, 60, 60, 60]);
         assert_eq!(backoff(1000), Duration::from_secs(3600));
         assert_eq!(REFUSED_RETRY, Duration::from_secs(3600));
+        // scans refused for what they say: only a changed file is sent again; a file the server couldn't read, hourly
+        let (_, scans) = parse_refusal(&json!({"message": "1 scan refused", "scans": [{"house": "EU-0-Alliance", "result": "rejected", "reason": "no realm"}]}));
+        assert!(refused_for_good(422, &scans));
+        assert!(!refused_for_good(422, &[]));
+        assert!(!refused_for_good(400, &scans));
         assert_eq!(busy_wait(Some(120)), Duration::from_secs(120));
         assert_eq!(busy_wait(None), Duration::from_secs(30));
         assert_eq!(busy_wait(Some(0)), Duration::from_secs(5));
