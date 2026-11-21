@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.0 (2026-11-21)
 
 - Shared auction prices: the app now also brings prices back. Every 15 minutes, and right after each auctions upload, it fetches the newest scan anyone uploaded to everlookdb.com for the auction houses you play on (your realms and factions, and the neutral one) and writes it into WoW Forever as a small data addon, EverlookDBAuctions_Shared, so EverlookDB Auctions has it at your next /reload or login, even out in the world. Unchanged houses cost almost nothing (the server answers "not modified"), errors are retried later without touching what is already written, and the window shows "Shared prices: EU-6946-Alliance, 12 min old". The Shared prices switch turns it off (and removes that folder). It only ever writes its own EverlookDBAuctions_Shared folder, which isn't listed under My addons.
 
