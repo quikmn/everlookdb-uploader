@@ -317,7 +317,8 @@ pub fn strictly_newer(installed: Option<&str>, latest: &str) -> bool {
 
 /// The addons in an install, grouped, matched to records and the catalog.
 pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
-    let folders = addons::scan(&install.addons_dir, &install.folder);
+    // the shared-prices data addon is the app's own output (shared.rs), not an addon to manage
+    let folders: Vec<Folder> = addons::scan(&install.addons_dir, &install.folder).into_iter().filter(|f| f.name != crate::shared::FOLDER).collect();
     let records = Records::load().of(&install.id);
     let conflicts = Conflicts::load();
     let mut known: Vec<(String, Vec<String>)> = records.values().map(|r| (r.id.clone(), r.folders.clone())).collect();

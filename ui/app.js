@@ -98,11 +98,37 @@ function renderRail() {
 
 function renderSettings() {
   $('sw-auto').checked = S.app.auto_update;
+  renderShared(S.app.shared && { ...S.app.shared, on: S.app.shared_prices });
   showHours(S.app.update_hours);
   $('sw-start').checked = S.app.autostart;
   $('start-label').textContent = S.app.autostart_label;
   $('app-version').textContent = `EverlookDB ${S.app.version}`;
 }
+
+// Shared prices (src-tauri/src/shared.rs): "Shared prices: EU-4-Alliance, 12 min old", one line per house
+function sharedAge(at) {
+  const m = Math.max(0, Math.round((Date.now() / 1000 - at) / 60));
+  if (m < 90) return `${m} min old`;
+  const h = Math.round(m / 60);
+  return h < 36 ? `${h} h old` : `${Math.round(h / 24)} days old`;
+}
+
+function renderShared(v) {
+  if (!v) return;
+  S.shared = v;
+  $('sw-shared').checked = v.on;
+  const houses = v.houses || [];
+  let text;
+  if (!v.on) text = 'Off';
+  else if (houses.length) text = 'Shared prices: ' + houses.map((h) => `${h.key}, ${sharedAge(h.at)}`).join('; ');
+  else text = v.note || 'Looking for your auction houses…';
+  if (v.on && houses.length && v.note) text += ` (${v.note})`;
+  $('shared-text').textContent = text;
+  $('shared-text').title = houses.map((h) => `${h.realm} ${h.side} (${h.key})`).join(', ');
+  const old = houses.some((h) => Date.now() / 1000 - h.at > 86400);
+  $('shared-dot').className = 'dot ' + (!v.on ? '' : v.note && v.note.startsWith('Last check failed') ? 'busy' : houses.length ? (old ? 'busy' : 'ok') : 'idle');
+}
+setInterval(() => renderShared(S.shared), 30000);
 
 // each file's last answer: green taken, amber partly taken (or failed once), red refused or failing
 const FILE_DOT = { ok: 'ok', partial: 'busy', retry: 'busy', failed: 'error' };
@@ -1285,6 +1311,10 @@ $('hours').addEventListener('keydown', (e) => {
   }
 });
 $('sw-start').addEventListener('change', (e) => invoke('set_setting', { name: 'autostart', value: e.target.checked }));
+$('sw-shared').addEventListener('change', (e) => {
+  invoke('set_setting', { name: 'shared_prices', value: e.target.checked });
+  renderShared({ ...(S.shared || {}), on: e.target.checked, houses: e.target.checked ? (S.shared || {}).houses || [] : [], note: null });
+});
 $('sw-uploads').addEventListener('change', (e) => invoke('set_setting', { name: 'paused', value: !e.target.checked }));
 $('upload-now').addEventListener('click', uploadNow);
 
@@ -1440,6 +1470,7 @@ listen('progress', (e) => {
   else paintProgress();
 });
 listen('uploads', (e) => renderUploads(e.payload));
+listen('shared', (e) => renderShared(e.payload));
 listen('catalog', () => loadCatalog(false));
 listen('settings', () => loadState());
 listen('installs', () => loadState().then(loadItems));

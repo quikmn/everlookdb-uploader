@@ -130,6 +130,10 @@ pub struct Config {
     /// where the window was last (logical pixels), so it opens there again
     #[serde(default)]
     pub window: Option<WindowRect>,
+    /// shared auction prices: write other players' newest scans of our auction houses into the game as the
+    /// EverlookDBAuctions_Shared data addon (see shared.rs)
+    #[serde(default = "yes")]
+    pub shared_prices: bool,
 }
 
 /// A window's place and inner size, in logical pixels.
@@ -197,7 +201,7 @@ pub fn clamp_hours(h: f64) -> u32 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true }
     }
 }
 

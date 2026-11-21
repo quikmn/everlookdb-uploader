@@ -572,6 +572,10 @@ impl Watcher {
                     }
                     remember(&self.shared, &k, hash, true, state, Some(line.clone()));
                     event = Some((if level == "ok" { Kind::Ok } else { Kind::Busy }, line));
+                    if is_auctions(f) {
+                        // the server has the newest scan now: shared prices fetch it at once
+                        crate::shared::poke();
+                    }
                 }
                 Outcome::Refused { code, message, scans } => {
                     let failures = failures + 1;

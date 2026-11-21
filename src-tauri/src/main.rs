@@ -11,6 +11,7 @@ mod giveaway;
 mod github;
 mod icons;
 mod manager;
+mod shared;
 mod worker;
 mod wow;
 
@@ -45,6 +46,7 @@ Usage: everlookdb-uploader [options]
   --wow <folder>   use (and remember) this WoW Forever folder for uploads
   --check          print the installs, addons and data files found, then exit
   --once           upload every changed data file once, print the results, then exit
+  --shared         fetch the shared auction prices once, write the data addon, print what it did, then exit
   --background     start quietly in the tray (used at login)
 Settings live in %APPDATA%\\com.everlookdb.uploader (macOS: ~/Library/Application Support/com.everlookdb.uploader),
 or EVERLOOKDB_UPLOADER_DIR. EVERLOOKDB_CATALOG points the addon catalog elsewhere (a URL or a local file).";
@@ -54,6 +56,7 @@ struct Args {
     wow: Option<PathBuf>,
     check: bool,
     once: bool,
+    shared: bool,
     background: bool,
 }
 
@@ -63,6 +66,7 @@ fn args() -> Result<Args, String> {
         wow: None,
         check: false,
         once: false,
+        shared: false,
         background: false,
     };
     let mut it = std::env::args().skip(1);
@@ -72,6 +76,7 @@ fn args() -> Result<Args, String> {
             "--wow" => a.wow = Some(it.next().ok_or("--wow needs a folder")?.into()),
             "--check" => a.check = true,
             "--once" => a.once = true,
+            "--shared" => a.shared = true,
             "--background" => a.background = true,
             "--help" | "-h" => return Err(HELP.into()),
             "--version" | "-V" => return Err(format!("everlookdb-uploader {}", env!("CARGO_PKG_VERSION"))),
@@ -122,7 +127,7 @@ fn main() {
     };
     config::init_dir(default_config_dir());
     config::init_cache_dir(default_cache_dir());
-    if args.check || args.once {
+    if args.check || args.once || args.shared {
         attach_console();
         std::process::exit(command_line(&args));
     }
@@ -165,6 +170,18 @@ fn command_line(args: &Args) -> i32 {
     if files.is_empty() {
         println!("No WTF/Account/*/SavedVariables/EverlookDB.lua or EverlookDBAuctions.lua yet.");
     }
+    if args.shared {
+        let (view, _) = shared::Poller::new(&args.server).refresh(&dir, cfg.shared_prices);
+        println!("Shared prices: {}", if view.on { "on" } else { "off" });
+        let now = chrono::Utc::now().timestamp();
+        for h in &view.houses {
+            println!("  {} ({} {}): scan {} min old", h.key, h.realm, h.side, (now - h.at).max(0) / 60);
+        }
+        if let Some(n) = &view.note {
+            println!("  {n}");
+        }
+        return if view.note.as_deref().is_some_and(|n| n.starts_with("Last check failed")) { 2 } else { 0 };
+    }
     if !args.once {
         return 0;
     }
@@ -191,6 +208,8 @@ struct Ui {
     tx: Mutex<Sender<Cmd>>,
     shared: Arc<Shared>,
     uploads: Mutex<UploadState>,
+    /// what the shared-prices thread last did (shared.rs)
+    shared_view: Mutex<shared::View>,
     catalog: Mutex<CatalogState>,
     /// (install id, item key) -> the texture its .toc names as its icon (from the last list of that install)
     icon_files: Mutex<HashMap<(String, String), PathBuf>>,
@@ -424,6 +443,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
             giveaway: giveaway::view_if_shown(&shared.cfg.lock().unwrap().receipts),
             ..Default::default()
         }),
+        shared_view: Mutex::new(shared::View { on: shared.cfg.lock().unwrap().shared_prices, ..Default::default() }),
         catalog: Mutex::new(CatalogState::default()),
         icon_files: Mutex::new(HashMap::new()),
         github_seen: Mutex::new(HashMap::new()),
@@ -440,6 +460,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
         }
     });
 
+    let for_shared = shared.clone();
     let handle = app.clone();
     let mut last: Option<(String, usize, Option<PathBuf>, Vec<worker::FileView>, config::Receipts)> = None;
     std::thread::spawn(move || {
@@ -454,6 +475,22 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
                 last = Some(now);
             }
         })
+    });
+
+    let (handle, cfg_of) = (app.clone(), for_shared);
+    let server = cfg_of.server.clone();
+    std::thread::spawn(move || {
+        shared::run(
+            move || {
+                let c = cfg_of.cfg.lock().unwrap();
+                (c.wow_dir.clone(), c.shared_prices)
+            },
+            server,
+            |v: &shared::View| {
+                *handle.state::<Ui>().shared_view.lock().unwrap() = v.clone();
+                let _ = handle.emit("shared", v.clone());
+            },
+        )
     });
 
     if show {
@@ -657,6 +694,8 @@ struct AppState {
     installs: Vec<wow::Install>,
     selected: Option<String>,
     auto_update: bool,
+    shared_prices: bool,
+    shared: shared::View,
     update_hours: u32,
     min_hours: u32,
     max_hours: u32,
@@ -718,6 +757,8 @@ fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
         installs: list,
         selected,
         auto_update: cfg.auto_update,
+        shared_prices: cfg.shared_prices,
+        shared: ui.shared_view.lock().unwrap().clone(),
         update_hours: hours,
         min_hours: config::MIN_HOURS,
         max_hours: config::MAX_HOURS,
@@ -1227,6 +1268,13 @@ fn set_setting(app: AppHandle, ui: State<Ui>, name: String, value: serde_json::V
             let mut c = ui.shared.cfg.lock().unwrap();
             c.auto_update = value.as_bool().unwrap_or(true);
             c.save();
+        }
+        "shared_prices" => {
+            let mut c = ui.shared.cfg.lock().unwrap();
+            c.shared_prices = value.as_bool().unwrap_or(true);
+            c.save();
+            drop(c);
+            shared::poke();
         }
         "paused" => set_paused(&app, value.as_bool().unwrap_or(false)),
         "autostart" => {
