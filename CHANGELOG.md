@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.3 (2026-11-21)
 
 - "Send error logs to the developer": next to every error the app shows (uploads, installs and updates, the Price Feed, Install from GitHub) and as "Report a problem" at the bottom of the sidebar. One click sends the app's log, its last errors and what it found (app and Windows version, your games and their versions, your addons with versions, the size and date of the files it uploads) to everlookdb.com and shows "Sent · report K7Q2M9" with Copy id, so you can quote it. Your Windows user name, account folder names, emails, codes and keys are taken out first, and the files' contents are never sent. "What gets sent" opens the exact text. If it can't be sent, a copy is kept as a zip you can show in its folder. An upload that can't reach the server now also writes the real cause in the log.
 
