@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.5 (2026-11-21)
 
 - The app never pops up on its own any more. It checks every 10 minutes and updates itself and your addons quietly; you can switch either off in Settings.
 
