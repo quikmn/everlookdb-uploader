@@ -2,46 +2,44 @@
 
 ## v0.7.5 (2026-11-21)
 
-- The app never pops up on its own any more. It checks every 10 minutes and updates itself and your addons quietly; you can switch either off in Settings.
+- The app never pops up on its own any more. It updates itself and your addons quietly; you can switch either off in Settings.
 
 ## v0.7.4 (2026-11-21)
 
-- The Price Feed checks for new scans once a minute instead of every 15 minutes, so a scan someone uploads is in your game folder within about a minute. A check is one tiny request for all your auction houses at once ("anything new?"); only a house with a newer scan is downloaded, and nothing is written when nothing changed. After errors it waits longer (2, 4, 8, then 15 minutes, or what the server asks) and then goes back to once a minute. The log has a line when something new arrives and a short summary every 15 minutes otherwise.
-- Price Feed: finds your auction houses again after today's WoW Forever client update, which stopped telling addons the realm's name: the houses are now also matched by the realm ID in your saved scans.
-- An auctions file whose scans the server refused for what they say (no realm, too old) is no longer sent again every hour and logged as a new error each time: it's sent again when the file changes, which is when the game has saved something new. A file the server couldn't read at all is still tried hourly.
+- The Price Feed brings new auction scans within about a minute instead of 15 minutes.
+- The Price Feed finds your auction houses again after the latest WoW Forever update.
+- An auctions file the site turned down is no longer sent again every hour; it goes again when the game saves something new.
 
 ## v0.7.3 (2026-11-21)
 
-- "Send error logs to the developer": next to every error the app shows (uploads, installs and updates, the Price Feed, Install from GitHub) and as "Report a problem" at the bottom of the sidebar. One click sends the app's log, its last errors and what it found (app and Windows version, your games and their versions, your addons with versions, the size and date of the files it uploads) to everlookdb.com and shows "Sent · report K7Q2M9" with Copy id, so you can quote it. Your Windows user name, account folder names, emails, codes and keys are taken out first, and the files' contents are never sent. "What gets sent" opens the exact text. If it can't be sent, a copy is kept as a zip you can show in its folder. An upload that can't reach the server now also writes the real cause in the log.
+- New: "Send error logs to the developer", next to every error and as "Report a problem" in the sidebar. You get a report id to quote. Your user name, account folders, emails and keys are taken out first, and "What gets sent" shows the exact text.
 
 ## v0.7.2 (2026-11-21)
 
-- The shared auction prices now have a name: the Price Feed. The window's panel and switch say Price Feed, and in game the data addon shows as "EverlookDB Auctions: Price Feed" under EverlookDB Auctions in the addon list (it depends on it, so it never loads alone). It is also a CurseForge addon now that ships empty, for the app to fill (like TradeSkillMaster's AppHelper): the app writes its data over that empty copy and keeps its version, never deletes a file it didn't write, and when CurseForge updates the addon (bringing back the empty copy) the app notices within a minute and writes its data again from what it has. Turning the Price Feed off now leaves the empty copy instead of removing the folder. Its folder is still EverlookDBAuctions_Shared, so nothing needs reinstalling.
-- The log (uploader.log) now has a line for each addon catalog fetch and each automatic update check.
-- Get all of our addons in one click: a new install (or anyone with none of them yet) sees a small card above My addons listing the EverlookDB addons, all ticked, with one Install all button. Each one installs the usual safe way and the card shows how far each one is. "Not now" hides the card for good, and Get addons has an EverlookDB addons filter with "Install all missing" any time later.
+- The shared auction prices are now called the Price Feed, and show in game as "EverlookDB Auctions: Price Feed". It is also on CurseForge; the app keeps it filled. Nothing needs reinstalling.
+- New: get all of our addons in one click. A new install shows the EverlookDB addons with one Install all button, and Get addons has an EverlookDB addons filter.
 
 ## v0.7.1 (2026-11-21)
 
-- Fixed: 0.7.0 froze at start, before its window or tray icon showed. If your app froze after updating, download 0.7.1 from everlookdb.com once; it updates itself again from then on.
+- Fixed: 0.7.0 froze at start. If your app froze after updating, download 0.7.1 from everlookdb.com once; it updates itself again from then on.
 
 ## v0.7.0 (2026-11-21)
 
-- Shared auction prices: the app now also brings prices back. Every 15 minutes, and right after each auctions upload, it fetches the newest scan anyone uploaded to everlookdb.com for the auction houses you play on (your realms and factions, and the neutral one) and writes it into WoW Forever as a small data addon, EverlookDBAuctions_Shared, so EverlookDB Auctions has it at your next /reload or login, even out in the world. Unchanged houses cost almost nothing (the server answers "not modified"), errors are retried later without touching what is already written, and the window shows "Shared prices: EU-6946-Alliance, 12 min old". The Shared prices switch turns it off (and removes that folder). It only ever writes its own EverlookDBAuctions_Shared folder, which isn't listed under My addons.
+- New: shared auction prices. The app brings the newest auction scans other players uploaded for your auction houses into WoW Forever, so EverlookDB Auctions has prices at your next /reload or login. One switch turns it off.
 
 ## v0.6.0 (2026-11-20)
 
-- Opens faster: your addon list shows at once from the last check, and the fresh one loads in the background.
-- Installs never lose the old addon: the old copy stays until the new one is fully in place, and an install cut short (a crash, a reboot) is put right the next time the app starts.
-- Automatic updates wait while World of Warcraft is running and tell you to /reload afterwards. The update timer follows the clock, so a sleeping PC doesn't push it back.
-- Automatic updates never downgrade: an addon EverlookDB didn't install is only replaced when the new version is clearly higher.
-- WoW folders are found once and remembered: the drive scan runs at start or when you ask, only on local hard drives, and skips drives that don't answer within 3 seconds.
-- Errors are plain sentences (details go to the log). A folder in the way of an install is reported once per version, with a Replace button that keeps a backup.
-- Open folder opens the addon's own folder. A What's new link sits next to updates, Update all says which game it covers, a download with no data for a minute gives up instead of hanging, and only the newest 3 backups per addon are kept.
-- The app's own updates wait until no addon change or upload is running; afterwards the window reopens only if it was open, where it was, without taking the focus.
+- Opens faster: your addon list shows at once.
+- Installs never lose the old addon, even when cut short by a crash or reboot.
+- Automatic updates wait while World of Warcraft is running, and never downgrade an addon.
+- WoW folders are found once and remembered.
+- Clearer error messages, with a Replace button when a folder is in the way.
+- Open folder, a What's new link next to updates, and fewer old backups kept.
+- The app's own updates wait until nothing else is running and never take the focus.
 
 ## v0.5.1 (2026-11-19)
 
-- "Update addons by itself" now updates every addon EverlookDB knows, also ones you or another app installed (Bartender4, Questie...), not only the ones EverlookDB installed. The old copy is kept in the backups folder first. Developer checkouts (a folder with .git) and addons without a real version are left alone.
+- "Update addons by itself" now updates every addon EverlookDB knows, also ones you or another app installed, not only the ones EverlookDB installed. The old copy is kept in the backups folder first. Developer checkouts (a folder with .git) and addons without a real version are left alone.
 - Update all is always at the top of My addons: one click checks every addon for a new version and updates all that have one. It also says how many updates are waiting, or that everything is up to date.
 - Each Update button says when that version was released ("released today 22:23"; hover for the exact time).
 - The bottom line says when the addon list was checked, when the automatic check last ran and what it did ("nothing to update", "updated 2 addons"), and when it runs next. The "Updated by itself" note says when it happened.
@@ -50,7 +48,7 @@
 
 - Right-click an addon for its own menu: in My addons Update, Open folder, its project page, Copy name and
   Uninstall; in Get addons Install (or Update), its project page and Copy name. Uninstall now works for every addon,
-  also ones you or another app installed (Titan Panel, TomTom...): it shows exactly which folders go, keeps any that
+  also ones you or another app installed: it shows exactly which folders go, keeps any that
   another addon uses too, and moves them to the Recycle Bin, so you can get them back. The browser's own menu (Back,
   Refresh, Print) and its reload and print keys are gone; text fields still have copy and paste.
 - Install from GitHub: on Get addons, paste the link of an addon's GitHub page (or type it in the search box) and
