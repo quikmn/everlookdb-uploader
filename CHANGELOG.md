@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- "Send error logs to the developer": next to every error the app shows (uploads, installs and updates, the Price Feed, Install from GitHub) and as "Report a problem" at the bottom of the sidebar. One click sends the app's log, its last errors and what it found (app and Windows version, your games and their versions, your addons with versions, the size and date of the files it uploads) to everlookdb.com and shows "Sent · report K7Q2M9" with Copy id, so you can quote it. Your Windows user name, account folder names, emails, codes and keys are taken out first, and the files' contents are never sent. "What gets sent" opens the exact text. If it can't be sent, a copy is kept as a zip you can show in its folder. An upload that can't reach the server now also writes the real cause in the log.
+
 ## v0.7.2 (2026-11-21)
 
 - The shared auction prices now have a name: the Price Feed. The window's panel and switch say Price Feed, and in game the data addon shows as "EverlookDB Auctions: Price Feed" under EverlookDB Auctions in the addon list (it depends on it, so it never loads alone). It is also a CurseForge addon now that ships empty, for the app to fill (like TradeSkillMaster's AppHelper): the app writes its data over that empty copy and keeps its version, never deletes a file it didn't write, and when CurseForge updates the addon (bringing back the empty copy) the app notices within a minute and writes its data again from what it has. Turning the Price Feed off now leaves the empty copy instead of removing the folder. Its folder is still EverlookDBAuctions_Shared, so nothing needs reinstalling.

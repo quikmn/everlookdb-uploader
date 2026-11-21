@@ -357,6 +357,20 @@ pub fn client() -> reqwest::blocking::Client {
         .expect("http client")
 }
 
+/// An error and what caused it, for the log ("error sending request ...: dns error: no such host").
+pub fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let t = c.to_string();
+        if !out.contains(&t) {
+            out += &format!(": {t}");
+        }
+        cause = c.source();
+    }
+    out
+}
+
 /// POST the body as it is. That is all that is sent.
 fn post(http: &reqwest::blocking::Client, server: &str, body: Vec<u8>, gzipped: bool) -> Outcome {
     let mut req = http.post(upload_url(server)).header("content-type", "text/plain");
@@ -365,7 +379,11 @@ fn post(http: &reqwest::blocking::Client, server: &str, body: Vec<u8>, gzipped: 
     }
     let resp = match req.body(body).send() {
         Ok(r) => r,
-        Err(e) => return Outcome::Failed(if e.is_timeout() { "timed out".into() } else { "can't reach the server".into() }),
+        Err(e) => {
+            // the window says it short; the log (and a problem report) keeps why
+            config::log(&format!("upload: {}", error_chain(&e)));
+            return Outcome::Failed(if e.is_timeout() { "timed out".into() } else { "can't reach the server".into() });
+        }
     };
     let code = resp.status().as_u16();
     let retry = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok());
@@ -431,7 +449,7 @@ fn clock(t: i64) -> String {
 }
 
 /// What each file is, by name and (with several accounts) by number: never the account folder's name.
-fn labels(files: &[PathBuf]) -> Vec<String> {
+pub fn labels(files: &[PathBuf]) -> Vec<String> {
     let account = |f: &PathBuf| f.parent().and_then(Path::parent).map(Path::to_path_buf);
     let mut accounts: Vec<PathBuf> = files.iter().filter_map(account).collect();
     accounts.sort();
@@ -526,6 +544,7 @@ impl Watcher {
                     let why = format!("{} is larger than {} MB", file_name(f), max_for(f) / 1024 / 1024);
                     let state = FileState { level: "failed".into(), headline: format!("Not sent: {why}"), at: unix_now(), ..Default::default() };
                     config::log(&format!("{label}: not sent: {why}"));
+                    crate::report::note_error("upload", &format!("{label}: not sent: {why}"));
                     remember(&self.shared, &k, "too-big".into(), false, state, None);
                     event = Some((Kind::Error, format!("{label}: not sent: {why}")));
                 }
@@ -590,6 +609,7 @@ impl Watcher {
                         failures,
                     };
                     config::log(&format!("{label} ({}) not accepted ({code}): {message}; trying again at {}", file_name(f), clock(next)));
+                    crate::report::note_error("upload", &format!("{label} ({}) not accepted ({code}): {message}", file_name(f)));
                     for s in &scans {
                         config::log(&scan_log(s));
                     }
@@ -610,6 +630,9 @@ impl Watcher {
                         failures,
                     };
                     config::log(&format!("{label} ({}): server busy, trying again at {}", file_name(f), clock(next)));
+                    if failures >= 2 {
+                        crate::report::note_error("upload", &format!("{label} ({}): the server is busy ({failures} tries)", file_name(f)));
+                    }
                     remember(&self.shared, &k, hash, false, state, None);
                     event = Some((Kind::Busy, format!("Server busy, trying again in {} s", wait.as_secs())));
                 }
@@ -627,6 +650,7 @@ impl Watcher {
                         failures,
                     };
                     config::log(&format!("{label} ({}): upload failed ({why}), try {failures}; trying again at {}", file_name(f), clock(next)));
+                    crate::report::note_error("upload", &format!("{label} ({}): upload failed ({why}), try {failures}", file_name(f)));
                     remember(&self.shared, &k, hash, false, state, None);
                     let kind = if failures >= 2 { Kind::Error } else { Kind::Busy };
                     event = Some((kind, format!("{label}: upload failed ({why}), trying again at {}", clock(next))));

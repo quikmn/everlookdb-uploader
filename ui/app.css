@@ -543,6 +543,40 @@ button { cursor: pointer; }
 .notice .close { grid-column: 2; grid-row: 1; align-self: start; }
 .upload-alert h3 { color: var(--bad); }
 
+/* "Send error logs to the developer" (app.js, problem reports): a plain button next to an error, a quiet entry in the
+   sidebar's footer */
+
+.report { grid-column: 1 / -1; display: grid; gap: 4px; margin-top: 4px; }
+.report[hidden] { display: none; }
+.report-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.report-row .btn { font-weight: 600; }
+.report-what {
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 340px;
+  padding: 5px 9px;
+  border-radius: var(--r-s);
+  border: 1px solid var(--line-2);
+  background: var(--night);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+.report-what::placeholder { color: var(--ink-3); }
+.report-what:focus { outline: none; border-color: #39507a; }
+.report-sub { margin: 0; font-size: 12px; color: var(--ink-3); }
+.report-sub .text-button.quiet { padding: 0; }
+.report-done { margin: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 13px; color: var(--ink-2); }
+.report-done b { color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
+.report-done svg { width: 14px; height: 14px; fill: none; stroke: var(--ok); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.report-fail { margin: 0; font-size: 12.5px; color: var(--warn); }
+/* the sidebar: quiet, one line, a smaller box */
+.report.foot { margin-top: 0; gap: 2px; }
+.report.foot .report-row { gap: 4px 10px; }
+.report.foot .report-done { font-size: 12px; }
+.rail-report .btn { font-size: 12px; padding: 5px 10px; white-space: normal; text-align: left; }
+.rail-report .report-what { flex-basis: 100%; max-width: none; }
+
 @keyframes drop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
 /* list */

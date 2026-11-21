@@ -131,6 +131,7 @@ function renderSettings() {
   $('sw-start').checked = S.app.autostart;
   $('start-label').textContent = S.app.autostart_label;
   $('app-version').textContent = `EverlookDB ${S.app.version}`;
+  paintReport($('report-foot'));
 }
 
 // Price Feed (src-tauri/src/shared.rs): "Price Feed: EU-4-Alliance, 12 min old", one line per house
@@ -154,7 +155,15 @@ function renderShared(v) {
   $('shared-text').textContent = text;
   $('shared-text').title = houses.map((h) => `${h.realm} ${h.side} (${h.key})`).join(', ');
   const old = houses.some((h) => Date.now() / 1000 - h.at > 86400);
-  $('shared-dot').className = 'dot ' + (!v.on ? '' : v.note && v.note.startsWith('Last check failed') ? 'busy' : houses.length ? (old ? 'busy' : 'ok') : 'idle');
+  const failing = v.on && !!v.note && v.note.startsWith('Last check failed');
+  $('shared-dot').className = 'dot ' + (!v.on ? '' : failing ? 'busy' : houses.length ? (old ? 'busy' : 'ok') : 'idle');
+  const box = $('shared-report');
+  const shown = failing ? `Price Feed: ${v.note}` : '';
+  if (box.hidden !== !failing || box.dataset.shown !== shown) {
+    box.hidden = !failing;
+    box.dataset.shown = shown;
+    if (failing) paintReport(box);
+  }
 }
 setInterval(() => renderShared(S.shared), 30000);
 
@@ -201,7 +210,9 @@ function renderUploads(u) {
           }</li>${f.details.map((d) => `<li class="where">${esc(d)}</li>`).join('')}`
       )
       .join('')}</ul>
-    <button class="link-button close" type="button" data-act="upload-now">Try now</button>`;
+    <button class="link-button close" type="button" data-act="upload-now">Try now</button>
+    ${reportSlot(bad.map((f) => `${f.label}: ${f.headline}`).join('; '))}`;
+  paintReports();
 }
 
 // ------------------------------------------------------------------------------------------------ giveaway
@@ -927,15 +938,19 @@ function showChanges(title, changes, failed = []) {
       )
       .join('')}</ul>
     ${reloadLine(changes)}
-    <button class="link-button close" type="button" data-act="dismiss">Dismiss</button>`;
+    <button class="link-button close" type="button" data-act="dismiss">Dismiss</button>
+    ${failed.length ? reportSlot(`${title}: ${failed.map((f) => (typeof f === 'string' ? f : `${f.name}: ${f.message}`)).join('; ')}`) : ''}`;
   n.hidden = false;
+  if (failed.length) paintReports();
 }
 
 function showError(text) {
   const n = $('notice');
   n.className = 'notice bad';
-  n.innerHTML = `<h3>${esc(text)}</h3><button class="link-button close" type="button" data-act="dismiss">Dismiss</button>`;
+  n.innerHTML = `<h3>${esc(text)}</h3><button class="link-button close" type="button" data-act="dismiss">Dismiss</button>${reportSlot(text)}`;
   n.hidden = false;
+  paintReports();
+  invoke('note_error', { source: 'window', message: text }).catch(() => {});
 }
 
 // an install that failed: its sentence, and "Replace (backup kept)" when folders are in the way
@@ -943,8 +958,9 @@ function showFailure(e, id) {
   if (!(e && typeof e === 'object' && e.conflict?.length && id)) return showError(errText(e));
   const n = $('notice');
   n.className = 'notice bad';
-  n.innerHTML = `<h3>${esc(errText(e))}</h3><p>${replaceButton(id, e.conflict)}</p><button class="link-button close" type="button" data-act="dismiss">Dismiss</button>`;
+  n.innerHTML = `<h3>${esc(errText(e))}</h3><p>${replaceButton(id, e.conflict)}</p><button class="link-button close" type="button" data-act="dismiss">Dismiss</button>${reportSlot(errText(e))}`;
   n.hidden = false;
+  paintReports();
 }
 
 // ------------------------------------------------------------------------------------------------ actions
@@ -1069,6 +1085,16 @@ async function onAction(el) {
       return ghInstall(el.dataset.id);
     case 'dismiss':
       $('notice').hidden = true;
+      break;
+    case 'report-send':
+      return sendReport(el.dataset.shown || '');
+    case 'report-copy':
+      return copyReportId(el.dataset.id);
+    case 'report-show':
+      invoke('show_report_file', { path: el.dataset.file }).catch((e) => toast(errText(e)));
+      break;
+    case 'report-text':
+      invoke('report_text', { what: R.what, shown: el.dataset.shown || '', after: el.dataset.after === '1' }).catch((e) => toast(errText(e)));
       break;
     case 'ours-install':
       return installOurs(el.dataset.where);
@@ -1408,6 +1434,95 @@ async function copyName(name) {
   toast(`Copied “${name}”`);
 }
 
+// ------------------------------------------------------------------------------------------------ problem reports
+
+// "Send error logs to the developer" (src-tauri/src/report.rs): one click sends the app's log, its last errors and
+// what it found, scrubbed, to everlookdb.com and shows the report's id. Every `.report` element is one: its
+// data-shown is the error it sits next to ('' for the quiet "Report a problem" in the sidebar).
+const R = { what: '', sending: new Set(), sent: new Map(), failed: new Map() };
+
+// a .report placeholder next to an error
+function reportSlot(shown) {
+  return `<div class="report" data-shown="${esc(shown)}"></div>`;
+}
+
+function paintReport(el) {
+  // never under the player's fingers: a box they are typing in is left as it is
+  if (el.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+  const shown = el.dataset.shown || '';
+  const foot = el.classList.contains('foot');
+  const id = R.sent.get(shown);
+  const fail = R.failed.get(shown);
+  const busy = R.sending.has(shown);
+  const what = `<button class="text-button quiet" type="button" data-act="report-text" data-shown="${esc(shown)}">What gets sent</button>`;
+  if (id) {
+    el.innerHTML = `<p class="report-done"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>Sent · report <b>${esc(id)}</b>
+      <button class="link-button" type="button" data-act="report-copy" data-id="${esc(id)}">Copy id</button></p>
+      <p class="report-sub">Quote ${esc(id)} if you write to us. ${what.replace('What gets sent', 'What was sent').replace('data-act="report-text"', 'data-act="report-text" data-after="1"')}</p>`;
+    return;
+  }
+  const button = foot
+    ? `<button class="text-button quiet report-go" type="button" data-act="report-send" data-shown=""${busy ? ' disabled' : ''}>${busy ? 'Sending…' : 'Report a problem'}</button>`
+    : `<button class="btn report-go" type="button" data-act="report-send" data-shown="${esc(shown)}"${busy ? ' disabled aria-busy="true" data-busy="Sending…"' : ''}>Send error logs to the developer</button>`;
+  // the sidebar's entry stays one quiet line: no box there
+  const box = foot ? '' : `<input class="report-what" type="text" maxlength="300" placeholder="What happened? (optional)" aria-label="What happened? (optional)" value="${esc(R.what)}">`;
+  el.innerHTML = `<div class="report-row">${button}${box}${foot ? what : ''}</div>
+    ${fail ? `<p class="report-fail">Couldn’t send it: ${esc(String(fail.error).replace(/\.$/, ''))}.${fail.file ? ` A copy is saved. <button class="link-button" type="button" data-act="report-show" data-file="${esc(fail.file)}">Show file</button>` : ''}</p>` : ''}
+    ${foot ? '' : `<p class="report-sub">${what}</p>`}`;
+}
+
+function paintReports() {
+  document.querySelectorAll('.report').forEach((el) => {
+    if (!el.hidden) paintReport(el);
+  });
+}
+
+async function sendReport(shown) {
+  if (R.sending.has(shown)) return;
+  R.sending.add(shown);
+  R.failed.delete(shown);
+  paintReports();
+  try {
+    const r = await invoke('send_report', { what: R.what, shown });
+    if (r.id) {
+      R.sent.set(shown, r.id);
+      R.what = '';
+      $('announce').textContent = `Sent: report ${r.id}`;
+    } else {
+      R.failed.set(shown, { error: r.error || 'it didn’t go through', file: r.file });
+    }
+  } catch (e) {
+    R.failed.set(shown, { error: errText(e), file: null });
+  } finally {
+    R.sending.delete(shown);
+    paintReports();
+  }
+}
+
+async function copyReportId(id) {
+  try {
+    await invoke('copy_report_id', { id });
+    toast(`Copied report id ${id}`);
+  } catch (e) {
+    toast(`Couldn’t copy: ${errText(e)}`);
+  }
+}
+
+// keep what was typed, in every box (re-renders put it back)
+document.addEventListener('input', (e) => {
+  if (e.target.classList?.contains('report-what')) R.what = e.target.value;
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.classList?.contains('report-what')) {
+    const box = e.target.closest('.report');
+    if (box) sendReport(box.dataset.shown || '');
+  }
+});
+// a box the player stopped typing in catches up with what happened meanwhile
+document.addEventListener('focusout', (e) => {
+  if (e.target.classList?.contains('report-what')) setTimeout(paintReports, 0);
+});
+
 // ------------------------------------------------------------------------------------------------ wiring
 
 document.addEventListener('click', (e) => {
@@ -1594,6 +1709,12 @@ function renderGh() {
   if (GH.looking) look.dataset.busy = 'Looking up…';
   $('gh-error').hidden = !GH.error;
   $('gh-error').textContent = GH.error;
+  const ghr = $('gh-report');
+  if (ghr.hidden !== !GH.error || ghr.dataset.shown !== `Install from GitHub: ${GH.error}`) {
+    ghr.hidden = !GH.error;
+    ghr.dataset.shown = `Install from GitHub: ${GH.error}`;
+    if (GH.error) paintReport(ghr);
+  }
   const box = $('gh-preview');
   if (!p || !i) {
     box.innerHTML = '';

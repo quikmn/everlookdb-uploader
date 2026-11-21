@@ -80,6 +80,15 @@ numbers only, a bad row is skipped) before it goes into the data addon. The data
 check is tried again after 1, 5 and 15 minutes; what was written stays. The window shows each house and how old its
 scan is.
 
+**Problem reports are sent only when you click.** "Send error logs to the developer" (next to an error) or "Report a
+problem" (the sidebar) sends one report to `https://everlookdb.com/api/v1/reports`: the app's version, the OS, the
+games it found and their versions, the selected game, the errors it noted (with times), the end of `uploader.log`,
+`config.json` without its upload hashes and receipts, the installed addons with versions, and for each file it uploads
+only its size, date and first and last line (quoted text blanked). Before it leaves your PC the user name in paths
+becomes `<user>`, account folders `<account 1>`, emails `<email>`, and codes, keys and tokens `<token>`. "What gets
+sent" opens the exact text. The server answers with a short id (report K7Q2M9) and keeps the report, never your IP.
+If it can't be sent, the report is kept in `reports/` in the settings folder.
+
 Its settings, the addon records, the cached catalog, kept zips and a small log stay on your computer, in
 `%APPDATA%\com.everlookdb.uploader` (Windows) or `~/Library/Application Support/com.everlookdb.uploader` (macOS).
 App updates are checked at `https://everlookdb.com/uploader/latest.json` and downloaded from this repository's
@@ -100,6 +109,8 @@ everlookdb-uploader --shared                fetch the Price Feed once, write the
 everlookdb-uploader --server <url>          upload somewhere else (or EVERLOOKDB_SERVER), e.g. a local test server
 everlookdb-uploader --wow <folder>          use (and remember) this WoW Forever folder for uploads
 everlookdb-uploader --background            start in the tray without opening the window (used at login)
+everlookdb-uploader --send-report [--test] [--what <text>]
+                                            send a problem report as the window's button does and print its id
 ```
 
 For testing: `EVERLOOKDB_UPLOADER_DIR` moves the settings folder (a copy started with it may run next to the real
@@ -122,6 +133,10 @@ cargo tauri build --bundles nsis -c "{\"bundle\":{\"createUpdaterArtifacts\":fal
 
 The last one builds an unsigned installer into `src-tauri/target/release/bundle/nsis/` (with
 `EVERLOOKDB_SKIP_SIGNING=1` it won't try to code-sign even when the certificate is on the machine).
+
+Problem reports: `src-tauri/src/report.rs` builds, scrubs and sends them (its tests cover the scrubbing and the size
+cap); the server side is Quarry's `crates/server/src/reports.rs`. We read them with Quarry's `deploy/reports.sh`
+(`list`, `show <id>`, `delete <id>`), on everlookdb.com's /admin/stats, or `GET /api/v1/admin/app-reports/<id>`.
 
 Layout: `src-tauri/src/wow.rs` finds the games and versions, `addons.rs` reads `.toc` files and groups folders,
 `catalog.rs` fetches and caches the addon catalog, `manager.rs` installs, updates, rolls back and removes,

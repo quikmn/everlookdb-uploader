@@ -12,6 +12,7 @@ mod github;
 mod icons;
 mod manager;
 mod ours;
+mod report;
 mod shared;
 mod worker;
 mod wow;
@@ -49,6 +50,8 @@ Usage: everlookdb-uploader [options]
   --once           upload every changed data file once, print the results, then exit
   --shared         fetch the shared auction prices once, write the data addon, print what it did, then exit
   --background     start quietly in the tray (used at login)
+  --send-report    send a problem report to the developer (as the window's button does), print its id, then exit;
+                   --what <text> adds a note, --test marks it as a test report
 Settings live in %APPDATA%\\com.everlookdb.uploader (macOS: ~/Library/Application Support/com.everlookdb.uploader),
 or EVERLOOKDB_UPLOADER_DIR. EVERLOOKDB_CATALOG points the addon catalog elsewhere (a URL or a local file).";
 
@@ -59,6 +62,9 @@ struct Args {
     once: bool,
     shared: bool,
     background: bool,
+    send_report: bool,
+    test: bool,
+    what: String,
 }
 
 fn args() -> Result<Args, String> {
@@ -69,6 +75,9 @@ fn args() -> Result<Args, String> {
         once: false,
         shared: false,
         background: false,
+        send_report: false,
+        test: false,
+        what: String::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -79,6 +88,9 @@ fn args() -> Result<Args, String> {
             "--once" => a.once = true,
             "--shared" => a.shared = true,
             "--background" => a.background = true,
+            "--send-report" => a.send_report = true,
+            "--test" => a.test = true,
+            "--what" => a.what = it.next().ok_or("--what needs a text")?,
             "--help" | "-h" => return Err(HELP.into()),
             "--version" | "-V" => return Err(format!("everlookdb-uploader {}", env!("CARGO_PKG_VERSION"))),
             _ => {} // the OS or the single-instance plugin may add its own
@@ -128,6 +140,10 @@ fn main() {
     };
     config::init_dir(default_config_dir());
     config::init_cache_dir(default_cache_dir());
+    if args.send_report {
+        attach_console();
+        std::process::exit(send_report_once(&args));
+    }
     if args.check || args.once || args.shared {
         attach_console();
         std::process::exit(command_line(&args));
@@ -198,6 +214,62 @@ fn command_line(args: &Args) -> i32 {
         }
     }
     if status.kind == Kind::Ok || status.kind == Kind::Idle { 0 } else { 2 }
+}
+
+/// --send-report: the report the window's button sends, built from the settings folder, sent once.
+fn send_report_once(args: &Args) -> i32 {
+    let cfg = Config::load();
+    let installs = wow::all_installs(&cfg.extra_roots);
+    let cat = catalog::cached_labelled();
+    let what = if args.what.is_empty() && args.test { "TEST report from the command line; delete it" } else { args.what.as_str() };
+    let inp = report::Inputs { cfg: &cfg, installs: &installs, catalog: cat.as_ref(), price_feed: None, what, shown: "", test: args.test };
+    let out = make_report(&args.server, &inp);
+    match (&out.id, &out.error) {
+        (Some(id), _) => {
+            println!("Sent: report {id}");
+            println!("What was sent: {}", out.text.as_deref().unwrap_or(""));
+            0
+        }
+        (None, e) => {
+            println!("Not sent: {}", e.as_deref().unwrap_or("?"));
+            if let Some(f) = &out.file {
+                println!("Kept: {f}");
+            }
+            2
+        }
+    }
+}
+
+/// What one press of "Send error logs to the developer" did.
+#[derive(Serialize, Clone, Default)]
+struct ReportOutcome {
+    /// the report's id from the server ("K7Q2M9")
+    id: Option<String>,
+    /// why it wasn't sent
+    error: Option<String>,
+    /// the zip kept instead, when it wasn't sent
+    file: Option<String>,
+    /// the exact text of what was (or would have been) sent: reports/last-report.txt
+    text: Option<String>,
+}
+
+/// Build, scrub and send a report; keep a zip when it can't be sent.
+fn make_report(server: &str, inp: &report::Inputs) -> ReportOutcome {
+    let log = report::log_tail(&config::dir(), report::MAX_LOG_LINES, report::MAX_LOG_BYTES);
+    let r = report::build(inp, &log);
+    let text = report::write_text("last-report.txt", &report::readable(&r)).ok().map(|p| p.display().to_string());
+    let sent = report::encode(&r).map_err(|e| format!("couldn't pack the report ({e})")).and_then(|gz| report::send(server, gz));
+    match sent {
+        Ok(id) => {
+            config::log(&format!("problem report sent: {id}"));
+            ReportOutcome { id: Some(id), text, ..Default::default() }
+        }
+        Err(e) => {
+            config::log(&format!("problem report not sent: {e}"));
+            let file = report::keep_copy(&r).map(|p| p.display().to_string()).map_err(|k| config::log(&format!("problem report not kept: {k}"))).ok();
+            ReportOutcome { error: Some(e), file, text, ..Default::default() }
+        }
+    }
 }
 
 /// What the tray and the window share.
@@ -347,6 +419,11 @@ fn run(args: Args) {
             install_from_github,
             our_addons,
             install_ours,
+            send_report,
+            report_text,
+            show_report_file,
+            copy_report_id,
+            note_error,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -1050,6 +1127,7 @@ async fn install_addon(app: AppHandle, install: String, id: String, take_over: V
             if !e.conflict.is_empty() {
                 manager::Conflicts::remember(&i.id, &addon.id, &addon.version, &e.conflict);
             }
+            report::note_error("install", &format!("{} into {}: {}", addon.name, i.name, e.message));
         }
         r
     })
@@ -1072,7 +1150,8 @@ fn uninstall_plan(ui: State<Ui>, install: String, id: String) -> Result<manager:
 fn remove_addon(ui: State<Ui>, install: String, id: String, folders: Vec<String>) -> Result<String, String> {
     let i = find_install(&ui, &install)?;
     let cat = ui.catalog();
-    let done = manager::uninstall(&i, cat.as_deref(), &id, &folders, &mut manager::recycle)?;
+    let done = manager::uninstall(&i, cat.as_deref(), &id, &folders, &mut manager::recycle)
+        .inspect_err(|e| report::note_error("uninstall", &format!("{id} in {}: {e}", i.name)))?;
     let name = done.name;
     if !done.managed {
         return Ok(name);
@@ -1165,7 +1244,10 @@ async fn install_from_github(app: AppHandle, install: String, id: String, take_o
         let change = manager::install(&i, &addon, &take_over, &mut |done, total| {
             let _ = app.emit("progress", Progress { install: &i.id, id: &addon.id, done, total, index: 1, count: 1 });
         })
-        .map_err(|e| e.message)?;
+        .map_err(|e| {
+            report::note_error("install", &format!("{} (GitHub) into {}: {}", addon.name, i.name, e.message));
+            e.message
+        })?;
         if addon.custom {
             let repo = addon.id.strip_prefix("github:").unwrap_or(&addon.id).to_string();
             {
@@ -1192,7 +1274,10 @@ fn rollback_addon(ui: State<Ui>, install: String, id: String) -> Result<manager:
     if !i.game {
         return Err(manager::NO_GAME.into());
     }
-    manager::rollback(&i, &id).map_err(|e| e.message)
+    manager::rollback(&i, &id).map_err(|e| {
+        report::note_error("rollback", &format!("{id} in {}: {}", i.name, e.message));
+        e.message
+    })
 }
 
 #[derive(Serialize, Clone)]
@@ -1218,6 +1303,9 @@ fn update_installs(app: &AppHandle, targets: &[wow::Install], cat: &catalog::Cat
             let _ = app.emit("progress", Progress { install: &i.id, id, done, total, index, count: count.max(index) });
         });
         out.changes.extend(c);
+        for x in &f {
+            report::note_error("update", &format!("{} in {}: {}", x.name, i.name, x.message));
+        }
         out.failed.extend(f);
     }
     out
@@ -1300,6 +1388,7 @@ async fn install_ours(app: AppHandle, install: String, ids: Vec<String>) -> Resu
                     if !e.conflict.is_empty() {
                         manager::Conflicts::remember(&i.id, &addon.id, &addon.version, &e.conflict);
                     }
+                    report::note_error("install", &format!("{} into {}: {}", addon.name, i.name, e.message));
                     out.failed.push(manager::Failed { id: addon.id.clone(), name: addon.name.clone(), message: e.message, conflict: e.conflict });
                 }
             }
@@ -1307,6 +1396,74 @@ async fn install_ours(app: AppHandle, install: String, ids: Vec<String>) -> Resu
         Ok(out)
     })
     .await
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// "Send error logs to the developer" (report.rs)
+
+/// The report's inputs as the window sees them now.
+fn with_inputs<T>(ui: &Ui, what: &str, shown: &str, f: impl FnOnce(&report::Inputs) -> T) -> T {
+    let cfg = ui.shared.cfg.lock().unwrap().clone();
+    let list = installs(ui);
+    let cat = ui.catalog();
+    let feed = ui.shared_view.lock().unwrap().clone();
+    f(&report::Inputs { cfg: &cfg, installs: &list, catalog: cat.as_deref(), price_feed: Some(&feed), what, shown, test: false })
+}
+
+/// One click: build, scrub and send the report. `shown`: the error the button sat next to; `what`: the player's
+/// optional line.
+#[tauri::command]
+async fn send_report(app: AppHandle, what: String, shown: String) -> Result<ReportOutcome, String> {
+    blocking(app, move |app| {
+        let ui = app.state::<Ui>();
+        if !shown.trim().is_empty() {
+            report::note_error("window", &shown);
+        }
+        Ok(with_inputs(&ui, &what, &shown, |inp| make_report(&ui.shared.server, inp)))
+    })
+    .await
+}
+
+/// "What gets sent": open the exact text in the player's text editor. `after`: the one last sent (or kept), when
+/// there is one; otherwise what a press would send now.
+#[tauri::command]
+async fn report_text(app: AppHandle, what: String, shown: String, after: bool) -> Result<(), String> {
+    blocking(app, move |app| {
+        let last = report::reports_dir().join("last-report.txt");
+        let path = if after && last.is_file() {
+            last
+        } else {
+            let ui = app.state::<Ui>();
+            let log = report::log_tail(&config::dir(), report::MAX_LOG_LINES, report::MAX_LOG_BYTES);
+            let r = with_inputs(&ui, &what, &shown, |inp| report::build(inp, &log));
+            report::write_text("preview.txt", &report::readable(&r)).map_err(|e| format!("Couldn't write the preview: {e}"))?
+        };
+        app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// "Show file": the kept zip in its folder.
+#[tauri::command(async)]
+fn show_report_file(app: AppHandle, path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.starts_with(report::reports_dir()) || !p.is_file() {
+        return Err("That file isn't there any more.".into());
+    }
+    app.opener().reveal_item_in_dir(&p).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn copy_report_id(id: String) -> Result<String, String> {
+    let id = report::report_id(&id).ok_or("That isn't a report id.")?;
+    set_clipboard(&id)?;
+    Ok(id)
+}
+
+/// An error the window showed (install, update, a link that didn't open ...), for the next report.
+#[tauri::command(async)]
+fn note_error(source: String, message: String) {
+    report::note_error(&source, &message);
 }
 
 /// Ask for a `World of Warcraft` folder and remember it. Returns the folder added, or None (cancelled).

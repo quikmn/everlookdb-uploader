@@ -57,6 +57,7 @@
           <span class="track" aria-hidden="true"></span>
           <span class="switch-label">Get the Price Feed</span>
         </label>
+        <div class="report rail-report" id="shared-report" hidden></div>
       </section>
       <!-- shown only while the giveaway is on (src-tauri/src/giveaway.rs) -->
       <section class="giveaway" id="giveaway" aria-labelledby="giveaway-title" hidden>
@@ -96,6 +97,7 @@
           <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com">EverlookDB: the WoW Forever database</button>
           <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com/addons.html">Addons</button>
         </p>
+        <div class="report foot" id="report-foot" data-shown=""></div>
         <p class="fine" id="app-version"></p>
       </section>
     </div>
@@ -158,6 +160,7 @@
     <button class="btn solid" type="submit" id="gh-look">Look up</button>
   </form>
   <p class="gh-error" id="gh-error" role="alert" hidden></p>
+  <div class="report" id="gh-report" hidden></div>
   <div class="gh-preview" id="gh-preview" aria-live="polite"></div>
 </dialog>
 

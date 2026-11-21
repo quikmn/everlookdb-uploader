@@ -643,6 +643,7 @@ impl Poller {
                 self.failures += 1;
                 let wait = crate::worker::backoff(self.failures).min(EVERY);
                 config::log(&format!("price feed: {e}; trying again in {} min", wait.as_secs() / 60));
+                crate::report::note_error("price feed", &format!("Price Feed: {e}"));
                 (wait, Some(format!("Last check failed: {e}")))
             }
             None => {
