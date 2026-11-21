@@ -172,7 +172,7 @@ fn command_line(args: &Args) -> i32 {
     }
     if args.shared {
         let (view, _) = shared::Poller::new(&args.server).refresh(&dir, cfg.shared_prices);
-        println!("Shared prices: {}", if view.on { "on" } else { "off" });
+        println!("Price Feed: {}", if view.on { "on" } else { "off" });
         let now = chrono::Utc::now().timestamp();
         for h in &view.houses {
             println!("  {} ({} {}): scan {} min old", h.key, h.realm, h.side, (now - h.at).max(0) / 60);
@@ -999,6 +999,8 @@ fn refresh_catalog(ui: &Ui, max_age: Option<Duration>) {
         github::merge(&mut c, &custom);
         c
     });
+    // one line per fetch, so the log shows the catalog came in (the check after a start)
+    config::log(&format!("catalog: {} addons ({:?})", cat.as_ref().map_or(0, |c| c.addons.len()), origin).to_lowercase());
     let mut c = ui.catalog.lock().unwrap();
     if let Some(cat) = cat {
         c.catalog = Some(Arc::new(cat));
@@ -1411,6 +1413,11 @@ fn note_auto(app: &AppHandle, off: bool, out: &Updated, waiting: &[String], cat:
     let ui = app.state::<Ui>();
     let waiting_n: usize = installs(&ui).iter().filter(|i| waiting.contains(&i.id)).map(|i| manager::pending(i, cat).len()).sum();
     ui.catalog.lock().unwrap().auto = Some(AutoRun { at: now_rfc3339(), off, updated: out.changes.len(), failed: out.failed.len(), waiting: waiting_n });
+    if off {
+        config::log("auto-update: off");
+    } else {
+        config::log(&format!("auto-update: checked, {} updated, {} failed, {} waiting for the game to close", out.changes.len(), out.failed.len(), waiting_n));
+    }
     let _ = app.emit("catalog", ());
     for f in &out.failed {
         config::log(&format!("auto-update failed: {}: {}", f.id, f.message));

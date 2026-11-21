@@ -33,10 +33,12 @@ the app where it is, so it keeps its old name in Applications (`EverlookDB Uploa
 
 ## What it touches
 
-- **Its own data addon, EverlookDBAuctions_Shared** (shared auction prices, below): the only folder it writes in
+- **Its own data addon, EverlookDBAuctions_Shared** ("EverlookDB Auctions: Price Feed" in the addon list, below): the only folder it writes in
   `Interface/AddOns` by itself. Only when EverlookDB Auctions is installed, only that folder, each file written whole
-  (a temp file renamed over the old one) and only when it changed. It isn't listed under My addons. The Shared prices
-  switch off removes it.
+  (a temp file renamed over the old one) and only when it changed. It isn't listed under My addons. The folder is
+  also a CurseForge addon that ships empty: the app writes its .toc, Shared.lua and a file per auction house over it,
+  never deletes a file it didn't write (README, LICENSE, Media/ stay), and writes its data again within a minute when
+  an addon update brings back the empty copy. The Price Feed switch off puts the empty copy back.
 
 - **Addons it installed**, and only those. Each install downloads the release zip straight from GitHub or Tukui,
   checks its size against the catalog, unpacks it into a staging folder next to `AddOns` (refusing any zip whose
@@ -67,7 +69,7 @@ the last upload or when the last upload failed: a failed or refused upload is se
 changes, otherwise after 1, 5, 15 and 30 minutes, then hourly, and when the app starts), and the window shows
 each file's last answer, green, amber or red. Auction files go gzip-compressed. Several accounts are fine. The switch under Uploads (or **Pause uploads** in the tray menu) stops it.
 
-**Shared prices fetch other players' auction scans and send nothing about you.** Every 15 minutes, and right after an
+**The Price Feed fetches other players' auction scans and sends nothing about you.** Every 15 minutes, and right after an
 auctions upload, the app asks `https://everlookdb.com/api/v1/auctions` for the list of auction houses and
 `/api/v1/auctions/house/{house}/compact` for the ones you play on (picked on your computer from the realm folders in
 `WTF/Account` and the houses in EverlookDBAuctions.lua; the request names only the house, like `EU-6946-Alliance`),
@@ -92,7 +94,7 @@ releases; they are signed, and the app refuses an update whose signature doesn't
 ```
 everlookdb-uploader --check                 print the games, their addons and the data files it finds
 everlookdb-uploader --once                  upload every changed data file once and print the result
-everlookdb-uploader --shared                fetch the shared auction prices once, write the data addon, print the houses
+everlookdb-uploader --shared                fetch the Price Feed once, write the data addon, print the houses
 everlookdb-uploader --server <url>          upload somewhere else (or EVERLOOKDB_SERVER), e.g. a local test server
 everlookdb-uploader --wow <folder>          use (and remember) this WoW Forever folder for uploads
 everlookdb-uploader --background            start in the tray without opening the window (used at login)

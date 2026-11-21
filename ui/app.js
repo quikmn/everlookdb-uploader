@@ -105,7 +105,7 @@ function renderSettings() {
   $('app-version').textContent = `EverlookDB ${S.app.version}`;
 }
 
-// Shared prices (src-tauri/src/shared.rs): "Shared prices: EU-4-Alliance, 12 min old", one line per house
+// Price Feed (src-tauri/src/shared.rs): "Price Feed: EU-4-Alliance, 12 min old", one line per house
 function sharedAge(at) {
   const m = Math.max(0, Math.round((Date.now() / 1000 - at) / 60));
   if (m < 90) return `${m} min old`;
@@ -120,7 +120,7 @@ function renderShared(v) {
   const houses = v.houses || [];
   let text;
   if (!v.on) text = 'Off';
-  else if (houses.length) text = 'Shared prices: ' + houses.map((h) => `${h.key}, ${sharedAge(h.at)}`).join('; ');
+  else if (houses.length) text = 'Price Feed: ' + houses.map((h) => `${h.key}, ${sharedAge(h.at)}`).join('; ');
   else text = v.note || 'Looking for your auction houses…';
   if (v.on && houses.length && v.note) text += ` (${v.note})`;
   $('shared-text').textContent = text;

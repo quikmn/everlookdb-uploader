@@ -8,10 +8,15 @@
 // after each auctions upload, with its ETag, so an unchanged house costs a 304. Errors back off (1, 5, 15, 30,
 // 60 minutes) and never touch what is already written; the last good copy of each house is kept in the cache folder.
 //
-// What is written: only the folder EverlookDBAuctions_Shared, nothing else in the game folder. Its .toc, Shared.lua
-// (the global table) and one Lua file per house (a file per house keeps each under Lua's constant limit), each
-// written to a temp file and renamed over the old one, and only when its content changed. Files of houses no longer
-// wanted are removed from that folder; with the setting off (or the Auctions addon not installed) the folder goes.
+// What is written: only the folder EverlookDBAuctions_Shared, nothing else in the game folder. That folder is also a
+// CurseForge addon ("EverlookDB Auctions: Price Feed", D:\Dev\EverlookDBAuctions_Shared) that ships empty, like
+// TradeSkillMaster's AppHelper: the app writes its .toc (the shipped one's Title, Dependencies and IconTexture, and
+// its Version), Shared.lua (the global table) and one Lua file per house (a file per house keeps each under Lua's
+// constant limit) over that empty copy, each to a temp file renamed over the old one, and only when its content
+// changed. It removes only house files it wrote itself (they start with MARK); README, LICENSE, Media/ and anything
+// else stay. With the setting off (or the Auctions addon not installed) the folder goes back to the empty copy; it
+// is never deleted. When a CurseForge update brings the empty copy back, the check once a minute (Poller::check)
+// notices the .toc changed or a house file is gone and writes the houses again from memory.
 //
 // Every number and string from the server is checked before it goes into a Lua file: a bad row is skipped, never
 // the house. There are no player names in the data (the server has none to send).
@@ -52,7 +57,7 @@ pub fn poke() {
     }
 }
 
-/// One house as the window shows it: "Shared prices: EU-4-Alliance, 12 min old".
+/// One house as the window shows it: "Price Feed: EU-4-Alliance, 12 min old".
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct HouseView {
     pub key: String,
@@ -256,10 +261,20 @@ fn file_of(key: &str) -> String {
     format!("{key}.lua")
 }
 
-pub fn toc(interface: u32, files: &[String]) -> String {
+/// The first line of every file the app writes: only files that start with it are ever replaced by the stub or
+/// removed (the folder may be a CurseForge copy, with its README, LICENSE and Media/ the app leaves alone).
+const MARK: &str = "-- Written by the EverlookDB App (do not edit)";
+
+/// The .toc, the same as the shipped addon's (D:\Dev\EverlookDBAuctions_Shared: Title, Dependencies, IconTexture),
+/// with the house files the app wrote. `version`: the installed copy's ## Version, kept as it was.
+pub fn toc(interface: u32, version: Option<&str>, files: &[String]) -> String {
     let mut t = format!(
-        "## Interface: {interface}\n## Title: EverlookDB Auctions: shared prices\n## Notes: Other players' newest auction scans from everlookdb.com, for EverlookDB Auctions. Written by the EverlookDB App; refreshed at /reload or login.\n## Author: EverlookDB App\n## LoadOnDemand: 0\n\nShared.lua\n"
+        "## Interface: {interface}\n## Title: EverlookDB Auctions: Price Feed\n## Notes: Other players' newest auction scans from everlookdb.com, for EverlookDB Auctions. The EverlookDB App fills it; it refreshes at /reload or login.\n## Author: quikmn\n"
     );
+    if let Some(v) = version {
+        t.push_str(&format!("## Version: {v}\n"));
+    }
+    t.push_str("## Dependencies: EverlookDBAuctions\n## IconTexture: Interface\\AddOns\\EverlookDBAuctions_Shared\\Media\\icon\n## X-License: GPL-3.0\n## LoadOnDemand: 0\n\nShared.lua\n");
     for f in files {
         t.push_str(f);
         t.push('\n');
@@ -269,15 +284,23 @@ pub fn toc(interface: u32, files: &[String]) -> String {
 
 pub fn shared_lua(written: i64) -> String {
     format!(
-        "-- Written by the EverlookDB App (do not edit): other players' newest auction scans from everlookdb.com.\n\
+        "{MARK}: other players' newest auction scans from everlookdb.com.\n\
          -- EverlookDB Auctions reads it at login and /reload, and keeps it apart from your own scans.\n\
          EverlookDBAuctionsShared = {{ version = 1, written = {written}, houses = {{}} }}\n"
     )
 }
 
+/// The empty Shared.lua, as the shipped addon has it (written = 0: no data).
+pub fn stub_lua() -> String {
+    format!(
+        "{MARK}: the Price Feed is off, so this holds no prices.\n\
+         EverlookDBAuctionsShared = {{ version = 1, written = 0, houses = {{}} }}\n"
+    )
+}
+
 pub fn house_lua(h: &House) -> String {
     let mut s = String::with_capacity(h.rows.len() * 60 + h.lows.len() * 120 + 512);
-    s.push_str("-- Written by the EverlookDB App (do not edit).\nlocal d = EverlookDBAuctionsShared\nif type(d) ~= \"table\" or type(d.houses) ~= \"table\" then return end\n");
+    s.push_str(&format!("{MARK}.\nlocal d = EverlookDBAuctionsShared\nif type(d) ~= \"table\" or type(d.houses) ~= \"table\" then return end\n"));
     s.push_str(&format!(
         "d.houses[\"{}\"] = {{\n  region = \"{}\", realm = \"{}\", realmID = {}, side = \"{}\", at = {}, auctions = {}, firstDay = {},\n  rows = {{\n",
         h.key, h.region, h.realm, h.realm_id, h.side, h.at, h.auctions, h.first_day
@@ -302,6 +325,19 @@ fn interface_of(addons: &Path) -> u32 {
         .unwrap_or(INTERFACE)
 }
 
+/// The ## Version of the copy in the folder (the CurseForge one, or what the app kept of it), when it is plain.
+fn version_of(dir: &Path) -> Option<String> {
+    let t = std::fs::read_to_string(dir.join(format!("{FOLDER}.toc"))).ok()?;
+    let v = t.lines().find_map(|l| l.trim().strip_prefix("## Version:").map(|v| v.trim().to_string()))?;
+    (!v.is_empty() && v.len() <= 32 && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))).then_some(v)
+}
+
+/// Whether the app wrote this file (it starts with MARK).
+fn ours(path: &Path) -> bool {
+    let mut head = [0u8; MARK.len()];
+    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && head == MARK.as_bytes()
+}
+
 /// Writes `name` in `dir` when its content differs: a temp file, then a rename over the old one.
 fn put(dir: &Path, name: &str, content: &str) -> std::io::Result<bool> {
     let path = dir.join(name);
@@ -317,8 +353,29 @@ fn put(dir: &Path, name: &str, content: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Makes `addons/EverlookDBAuctions_Shared` hold exactly these houses. Writes only files whose content changed and
-/// removes only files of its own folder. Returns whether anything changed.
+/// Removes the house files the app wrote that aren't in `keep`, and its own leftover temp files. Nothing else: a
+/// file that doesn't start with MARK, Shared.lua, the .toc and any folder (Media/) stay.
+fn prune(dir: &Path, keep: &[String]) -> std::io::Result<bool> {
+    let mut changed = false;
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        let path = e.path();
+        if !path.is_file() {
+            continue;
+        }
+        let temp = n.starts_with('.') && n.ends_with(".tmp");
+        let house = n.strip_suffix(".lua").is_some_and(key_ok) && n != "Shared.lua" && !keep.contains(&n) && ours(&path);
+        if temp || house {
+            std::fs::remove_file(&path)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Makes `addons/EverlookDBAuctions_Shared` hold these houses: its .toc, Shared.lua and a file per house, over the
+/// shipped empty copy when that is what is there. Writes only files whose content changed and removes only house
+/// files the app wrote earlier. Returns whether anything changed.
 pub fn write_addon(addons: &Path, houses: &[&House], now: i64) -> std::io::Result<bool> {
     let dir = addons.join(FOLDER);
     std::fs::create_dir_all(&dir)?;
@@ -327,29 +384,32 @@ pub fn write_addon(addons: &Path, houses: &[&House], now: i64) -> std::io::Resul
     for h in houses {
         changed |= put(&dir, &file_of(&h.key), &house_lua(h))?;
     }
-    // Shared.lua's time only moves when a house file did, so an unchanged poll writes nothing at all
-    let shared_now = std::fs::read_to_string(dir.join("Shared.lua")).is_ok();
-    if changed || !shared_now {
+    // Shared.lua's time only moves when a house file did, so an unchanged poll writes nothing at all; the empty copy's
+    // Shared.lua (after a CurseForge update, or the feed was off) is replaced
+    let shared = dir.join("Shared.lua");
+    if changed || !ours(&shared) || std::fs::read_to_string(&shared).is_ok_and(|t| t.contains("written = 0,")) {
         changed |= put(&dir, "Shared.lua", &shared_lua(now))?;
     }
-    changed |= put(&dir, &format!("{FOLDER}.toc"), &toc(interface_of(addons), &names))?;
-    for e in std::fs::read_dir(&dir)?.flatten() {
-        let n = e.file_name().to_string_lossy().into_owned();
-        let ours = n == "Shared.lua" || n == format!("{FOLDER}.toc") || names.contains(&n);
-        if !ours && e.path().is_file() {
-            std::fs::remove_file(e.path())?;
-            changed = true;
-        }
-    }
+    changed |= put(&dir, &format!("{FOLDER}.toc"), &toc(interface_of(addons), version_of(&dir).as_deref(), &names))?;
+    changed |= prune(&dir, &names)?;
     Ok(changed)
 }
 
-/// Removes our folder (the setting is off, or nothing to share). Only ever that folder.
-pub fn remove_addon(addons: &Path) -> bool {
+/// The feed is off (or EverlookDB Auctions isn't installed): the folder goes back to the empty copy, the same as the
+/// shipped one. It is never deleted: it may be a CurseForge install. Nothing is written when there is no folder.
+pub fn write_stub(addons: &Path) -> std::io::Result<bool> {
     let dir = addons.join(FOLDER);
-    dir.is_dir() && std::fs::remove_dir_all(&dir).is_ok()
+    if !dir.is_dir() {
+        return Ok(false);
+    }
+    let mut changed = prune(&dir, &[])?;
+    let shared = dir.join("Shared.lua");
+    if !shared.exists() || ours(&shared) {
+        changed |= put(&dir, "Shared.lua", &stub_lua())?;
+    }
+    changed |= put(&dir, &format!("{FOLDER}.toc"), &toc(interface_of(addons), version_of(&dir).as_deref(), &[]))?;
+    Ok(changed)
 }
-
 // ---------------------------------------------------------------------------------------------------------------
 // Fetching
 
@@ -427,6 +487,32 @@ pub struct Poller {
     server: String,
     houses: BTreeMap<String, (House, Option<String>)>,
     failures: u32,
+    /// what the last write left in the folder, to notice it was replaced
+    last: Option<Written>,
+}
+
+struct Written {
+    toc: String,
+    keys: Vec<String>,
+}
+
+/// Writes the houses again when the folder no longer holds what was `last` written (its .toc changed, or a house
+/// file is gone); what it wrote then, or None when nothing needed doing.
+fn restore(addons: &Path, last: &Written, houses: &BTreeMap<String, (House, Option<String>)>) -> std::io::Result<Option<Written>> {
+    let dir = addons.join(FOLDER);
+    if read_toc(addons) == last.toc && last.keys.iter().all(|k| dir.join(file_of(k)).is_file()) {
+        return Ok(None);
+    }
+    let list: Vec<&House> = last.keys.iter().filter_map(|k| houses.get(k).map(|h| &h.0)).collect();
+    if list.is_empty() {
+        return Ok(None);
+    }
+    write_addon(addons, &list, unix_now())?;
+    Ok(Some(Written { toc: read_toc(addons), keys: list.iter().map(|h| h.key.clone()).collect() }))
+}
+
+fn read_toc(addons: &Path) -> String {
+    std::fs::read_to_string(addons.join(FOLDER).join(format!("{FOLDER}.toc"))).unwrap_or_default()
 }
 
 impl Poller {
@@ -436,7 +522,28 @@ impl Poller {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("http client");
-        Poller { http, server: server.trim_end_matches('/').to_string(), houses: BTreeMap::new(), failures: 0 }
+        Poller { http, server: server.trim_end_matches('/').to_string(), houses: BTreeMap::new(), failures: 0, last: None }
+    }
+
+    /// The cheap check, about once a minute: when the folder no longer holds what the app last wrote (its .toc
+    /// changed, or a house file is gone: CurseForge updated the addon and brought back its empty copy), writes it again
+    /// from the houses in memory, without asking the server. Returns whether it wrote.
+    pub fn check(&mut self, forever: &Path) -> bool {
+        let Some(last) = &self.last else { return false };
+        let addons = forever.join("Interface").join("AddOns");
+        match restore(&addons, last, &self.houses) {
+            Ok(Some(w)) => {
+                config::log(&format!("price feed: {FOLDER} was replaced (an addon update?); wrote its {} houses again", w.keys.len()));
+                self.last = Some(w);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                config::log(&format!("price feed: can't write {FOLDER} again: {e}"));
+                self.last = None;
+                false
+            }
+        }
     }
 
     /// One refresh of every wanted house for the `_forever_` folder; writes the data addon. Returns the view and
@@ -444,13 +551,15 @@ impl Poller {
     pub fn refresh(&mut self, forever: &Path, on: bool) -> (View, Duration) {
         let addons = forever.join("Interface").join("AddOns");
         if !on {
-            if remove_addon(&addons) {
-                config::log("shared prices: off, removed the data addon");
+            self.last = None;
+            if write_stub(&addons).unwrap_or(false) {
+                config::log("price feed: off, the data addon is empty again");
             }
             return (View { on: false, houses: vec![], note: None }, EVERY);
         }
         if !addons.join(READER).is_dir() {
-            remove_addon(&addons);
+            self.last = None;
+            let _ = write_stub(&addons);
             return (View { on, houses: vec![], note: Some("Install EverlookDB Auctions to use them".into()) }, EVERY);
         }
         let now = unix_now();
@@ -497,7 +606,7 @@ impl Poller {
             let etag = self.houses.get(key).and_then(|h| h.1.clone());
             match fetch_house(&self.http, &self.server, key, etag.as_deref(), now) {
                 Ok(Got::New(h, tag)) => {
-                    config::log(&format!("shared prices: {} scan of {} ({} rows)", h.key, chrono::DateTime::from_timestamp(h.at, 0).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default(), h.rows.len()));
+                    config::log(&format!("price feed: {} scan of {} ({} rows)", h.key, chrono::DateTime::from_timestamp(h.at, 0).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default(), h.rows.len()));
                     // the checked house, for the next start (a 304 needs it)
                     save_cached(key, &body_of(&h), tag.as_deref());
                     self.houses.insert(key.clone(), (h, tag));
@@ -515,23 +624,25 @@ impl Poller {
         }
         let list: Vec<&House> = keys.iter().filter_map(|k| self.houses.get(k).map(|h| &h.0)).collect();
         let write = if list.is_empty() {
-            remove_addon(&addons);
-            Ok(false)
+            self.last = None;
+            write_stub(&addons)
         } else {
-            write_addon(&addons, &list, now)
+            let w = write_addon(&addons, &list, now);
+            self.last = w.is_ok().then(|| Written { toc: read_toc(&addons), keys: list.iter().map(|h| h.key.clone()).collect() });
+            w
         };
         if let Err(e) = write {
-            config::log(&format!("shared prices: can't write {FOLDER}: {e}"));
+            config::log(&format!("price feed: can't write {FOLDER}: {e}"));
             error.get_or_insert_with(|| format!("can't write the data addon ({e})"));
         } else if write.is_ok_and(|c| c) {
-            config::log(&format!("shared prices: wrote {FOLDER} ({} houses)", list.len()));
+            config::log(&format!("price feed: wrote {FOLDER} ({} houses)", list.len()));
         }
         let houses = list.iter().map(|h| HouseView { key: h.key.clone(), realm: h.realm.clone(), side: h.side.clone(), at: h.at }).collect();
         let (wait, note) = match error {
             Some(e) => {
                 self.failures += 1;
                 let wait = crate::worker::backoff(self.failures).min(EVERY);
-                config::log(&format!("shared prices: {e}; trying again in {} min", wait.as_secs() / 60));
+                config::log(&format!("price feed: {e}; trying again in {} min", wait.as_secs() / 60));
                 (wait, Some(format!("Last check failed: {e}")))
             }
             None => {
@@ -597,7 +708,12 @@ pub fn run(cfg: impl Fn() -> (Option<PathBuf>, bool), server: String, mut report
                 while rx.try_recv().is_ok() {}
                 next = Instant::now();
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                // about once a minute: put the data back if an addon update replaced the folder
+                if let (Some(d), true) = cfg() {
+                    p.check(&d);
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -658,6 +774,96 @@ mod tests {
         assert_eq!(pick(&list, &want), vec!["EU-6946-Alliance", "EU-6946-Neutral", "EU-7-Horde"]);
     }
 
+    fn game(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("everlookdb-shared-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let addons = root.join("Interface").join("AddOns");
+        std::fs::create_dir_all(addons.join(READER)).unwrap();
+        std::fs::write(addons.join(READER).join("EverlookDBAuctions.toc"), "## Interface: 16002\n## Title: x\n").unwrap();
+        (root, addons)
+    }
+
+    /// The addon as CurseForge installs it: its .toc, the empty Shared.lua, README, LICENSE and Media/.
+    fn install_stub(addons: &Path) {
+        let dir = addons.join(FOLDER);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Media")).unwrap();
+        std::fs::write(dir.join(format!("{FOLDER}.toc")), "## Interface: 16001\n## Title: EverlookDB Auctions: Price Feed\n## Version: v0.1.0\n## Dependencies: EverlookDBAuctions\n\nShared.lua\n").unwrap();
+        std::fs::write(dir.join("Shared.lua"), "-- EverlookDB Auctions: Price Feed. This is the empty copy.\nEverlookDBAuctionsShared = { version = 1, written = 0, houses = {} }\n").unwrap();
+        std::fs::write(dir.join("README.md"), "readme").unwrap();
+        std::fs::write(dir.join("LICENSE"), "gpl").unwrap();
+        std::fs::write(dir.join("Media").join("icon.tga"), "tga").unwrap();
+    }
+
+    fn names_in(dir: &Path) -> BTreeSet<String> {
+        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn writes_over_the_curseforge_copy_and_never_deletes_its_files() {
+        let (root, addons) = game("cf");
+        install_stub(&addons);
+        let dir = addons.join(FOLDER);
+        // a file the app didn't write, even one named like a house file, stays
+        std::fs::write(dir.join("EU-9-Horde.lua"), "-- not the app's file").unwrap();
+        let h = parse(&body(1_795_000_000), "EU-4-Alliance", 1_795_000_100).unwrap();
+        assert!(write_addon(&addons, &[&h], 100).unwrap());
+        let toc = std::fs::read_to_string(dir.join(format!("{FOLDER}.toc"))).unwrap();
+        assert!(toc.contains("## Version: v0.1.0\n"), "the installed copy's version is kept: {toc}");
+        assert!(toc.contains("## IconTexture: Interface\\AddOns\\EverlookDBAuctions_Shared\\Media\\icon\n"));
+        assert!(std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("written = 100"), "the empty Shared.lua is replaced");
+        assert_eq!(names_in(&dir), set(&["EU-4-Alliance.lua", "EU-9-Horde.lua", "EverlookDBAuctions_Shared.toc", "LICENSE", "Media", "README.md", "Shared.lua"]));
+        // the feed turned off: the empty copy again, the CurseForge files untouched
+        assert!(write_stub(&addons).unwrap());
+        assert_eq!(names_in(&dir), set(&["EU-9-Horde.lua", "EverlookDBAuctions_Shared.toc", "LICENSE", "Media", "README.md", "Shared.lua"]));
+        assert!(std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("written = 0,"));
+        let toc = std::fs::read_to_string(dir.join(format!("{FOLDER}.toc"))).unwrap();
+        assert!(toc.ends_with("\nShared.lua\n") && toc.contains("## Version: v0.1.0\n") && toc.contains("## Dependencies: EverlookDBAuctions\n"));
+        assert!(dir.join("Media").join("icon.tga").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("EU-9-Horde.lua")).unwrap(), "-- not the app's file");
+        assert!(!write_stub(&addons).unwrap(), "nothing changes the second time");
+        // no folder: the stub creates none
+        let (root2, addons2) = game("none");
+        assert!(!write_stub(&addons2).unwrap() && !addons2.join(FOLDER).exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    #[test]
+    fn writes_the_data_again_when_an_addon_update_brings_back_the_empty_copy() {
+        let (root, addons) = game("restore");
+        install_stub(&addons);
+        let h = parse(&body(1_795_000_000), "EU-4-Alliance", 1_795_000_100).unwrap();
+        let mut houses = BTreeMap::new();
+        houses.insert(h.key.clone(), (h.clone(), None));
+        write_addon(&addons, &[&h], 100).unwrap();
+        let mut last = Written { toc: read_toc(&addons), keys: vec![h.key.clone()] };
+        let mut check = || match restore(&addons, &last, &houses).unwrap() {
+            Some(w) => {
+                last = w;
+                true
+            }
+            None => false,
+        };
+        assert!(!check(), "nothing to do while the folder holds what was written");
+        // CurseForge updates the addon: the folder is replaced by the empty copy
+        install_stub(&addons);
+        assert!(check(), "noticed and written again");
+        let dir = addons.join(FOLDER);
+        assert!(dir.join("EU-4-Alliance.lua").is_file() && read_toc(&addons).ends_with("Shared.lua\nEU-4-Alliance.lua\n"));
+        assert!(!std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("written = 0,"));
+        assert!(dir.join("README.md").exists() && dir.join("Media").join("icon.tga").exists());
+        assert!(!check(), "and then quiet again");
+        // only the house file went: also noticed
+        std::fs::remove_file(dir.join("EU-4-Alliance.lua")).unwrap();
+        assert!(check() && dir.join("EU-4-Alliance.lua").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn writes_only_its_own_folder_and_only_on_change() {
         let root = std::env::temp_dir().join(format!("everlookdb-shared-{}", std::process::id()));
@@ -672,23 +878,29 @@ mod tests {
         let dir = addons.join(FOLDER);
         let toc = std::fs::read_to_string(dir.join(format!("{FOLDER}.toc"))).unwrap();
         assert!(toc.starts_with("## Interface: 16002\n"));
-        assert!(toc.contains("## LoadOnDemand: 0") && !toc.contains("Dependencies") && toc.ends_with("Shared.lua\nEU-4-Alliance.lua\n"));
+        assert!(toc.contains("## Title: EverlookDB Auctions: Price Feed\n"));
+        // listed under EverlookDB Auctions in the addon list, and never loaded without it
+        assert!(toc.contains("## Dependencies: EverlookDBAuctions\n"));
+        assert!(toc.contains("## LoadOnDemand: 0") && toc.ends_with("Shared.lua\nEU-4-Alliance.lua\n"));
         let lua = std::fs::read_to_string(dir.join("EU-4-Alliance.lua")).unwrap();
         assert!(lua.contains("[\"2589:0\"] = \"28,30,31,15710,424,0,3,10,20,100,294,20\","));
         assert!(lua.contains("[2589] = \"28,,30\","));
         // nothing changed: nothing written, not even Shared.lua's time
         assert!(!write_addon(&addons, &[&h], 200).unwrap());
         assert!(std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("written = 100"));
-        // a house no longer wanted goes; temp files never stay; other addons are untouched
-        std::fs::write(dir.join("EU-9-Horde.lua"), "old").unwrap();
+        // a house the app wrote that is no longer wanted goes; temp files never stay; other addons are untouched
+        std::fs::write(dir.join("EU-9-Horde.lua"), format!("{MARK}.\nold")).unwrap();
+        std::fs::write(dir.join(".EU-9-Horde.lua.tmp"), "half").unwrap();
         let mut h2 = h.clone();
         h2.at += 600;
         assert!(write_addon(&addons, &[&h2], 300).unwrap());
         let names: BTreeSet<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["EU-4-Alliance.lua", "EverlookDBAuctions_Shared.toc", "Shared.lua"].iter().map(|s| s.to_string()).collect());
         assert!(std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("written = 300"));
-        assert!(remove_addon(&addons));
-        assert!(!dir.exists() && addons.join("Other").join("Other.lua").exists() && addons.join(READER).exists());
+        // off: the empty copy, never a deleted folder
+        assert!(write_stub(&addons).unwrap());
+        assert_eq!(names_in(&dir), set(&["EverlookDBAuctions_Shared.toc", "Shared.lua"]));
+        assert!(addons.join("Other").join("Other.lua").exists() && addons.join(READER).exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
