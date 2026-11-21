@@ -9,7 +9,7 @@
     { "id": "github:quikmn/EverlookPets", "summary": "Hunter pet abilities and where to learn the next rank." },
     { "id": "github:quikmn/EverlookBar", "summary": "Info bars for XP, gold, bags and more, and a clean minimap." },
     { "id": "github:quikmn/EverlookDBChat", "summary": "Timestamps, class colours, copy chat and chat history." },
-    { "id": "github:quikmn/MouseoverMacros", "summary": "Mouseover macros, more macro slots and a ring menu." },
+    { "id": "github:quikmn/MouseoverMacros", "summary": "Mouseover macros for every class, extended macros, backups and a ring menu." },
     { "id": "github:quikmn/PlayerNotes", "summary": "Notes on players, shown in tooltips and chat." },
     { "id": "github:quikmn/DisenchantValue", "summary": "An item's disenchant value on its tooltip." }
   ],
