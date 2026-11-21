@@ -107,12 +107,21 @@ pub struct Config {
     /// `World of Warcraft` folders the player added by hand
     #[serde(default)]
     pub extra_roots: Vec<PathBuf>,
-    /// update the addons we installed by themselves (every `update_hours`)
+    /// "Update my addons by itself": update the addons we installed, every CHECK_EVERY, without asking
     #[serde(default = "yes")]
     pub auto_update: bool,
-    /// how often the addon list is checked (and, with auto_update, addons updated); see `hours()`
-    #[serde(default = "one")]
-    pub update_hours: u32,
+    /// the player set `auto_update` with its switch (so a false is theirs and stays); see migrate()
+    #[serde(default)]
+    pub auto_update_chosen: bool,
+    /// "Update the app by itself": install new versions of the app quietly (see main.rs spawn_updater)
+    #[serde(default = "yes")]
+    pub app_auto_update: bool,
+    /// the player set `app_auto_update` with its switch; a false without this is not a choice and is turned on
+    #[serde(default)]
+    pub app_auto_update_chosen: bool,
+    /// the last updates done by themselves (newest first, at most RECENT_MAX), for the window's quiet list
+    #[serde(default)]
+    pub recent_updates: Vec<RecentUpdate>,
     /// the install the window shows (its flavor folder)
     #[serde(default)]
     pub selected: Option<String>,
@@ -156,11 +165,62 @@ impl WindowRect {
     }
 }
 
-/// Written just before the app installs its own update, read once at the next start: whether the window was open,
-/// so the new version opens it again (without taking the focus) or stays in the tray.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+/// One update done by itself: an addon (`install` is its game) or the app (`install` empty).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RecentUpdate {
+    /// local time, RFC 3339
+    pub at: String,
+    #[serde(default)]
+    pub install: String,
+    pub name: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    pub to: String,
+}
+
+pub const RECENT_MAX: usize = 20;
+
+/// How often the app looks for updates of itself and of the addons (and once soon after it starts).
+pub const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// CHECK_EVERY, or EVERLOOKDB_CHECK_EVERY (seconds, at least 10) in a test instance (EVERLOOKDB_UPLOADER_DIR set),
+/// so a short test run sees several checks. The real app always uses CHECK_EVERY.
+pub fn check_every() -> std::time::Duration {
+    let test = std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_some_and(|s| !s.is_empty());
+    let over = std::env::var("EVERLOOKDB_CHECK_EVERY").ok().and_then(|s| s.trim().parse::<u64>().ok());
+    match over {
+        Some(secs) if test => std::time::Duration::from_secs(secs.max(10)),
+        _ => CHECK_EVERY,
+    }
+}
+
+/// When the next check is due: soon after the start (`first`), then `every` after the last one. A clock set back
+/// (the last check "in the future") counts from now.
+pub fn next_check(
+    started: chrono::DateTime<chrono::Local>,
+    last: Option<chrono::DateTime<chrono::Local>>,
+    now: chrono::DateTime<chrono::Local>,
+    first: std::time::Duration,
+    every: std::time::Duration,
+) -> chrono::DateTime<chrono::Local> {
+    let every = chrono::Duration::from_std(every).unwrap_or(chrono::Duration::minutes(10));
+    match last {
+        None => started + chrono::Duration::from_std(first).unwrap_or_default(),
+        Some(t) if t > now + chrono::Duration::minutes(1) => now + every,
+        Some(t) => t + every,
+    }
+}
+
+/// Written just before the app installs its own update, read once at the next start, so the new version knows it
+/// was started by the update (it then stays in the tray: the window never opens by itself).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Restart {
+    /// kept so notes written by older versions still read; never used to open the window
+    #[serde(default)]
     pub window_open: bool,
+    /// the version being installed (empty in notes from older versions)
+    #[serde(default)]
+    pub to: String,
     /// unix seconds
     pub at: i64,
 }
@@ -169,8 +229,8 @@ impl Restart {
     fn path() -> PathBuf {
         dir().join("restart.json")
     }
-    pub fn write(window_open: bool) {
-        let r = Restart { window_open, at: chrono::Local::now().timestamp() };
+    pub fn write(to: &str) {
+        let r = Restart { window_open: false, to: to.to_string(), at: chrono::Local::now().timestamp() };
         let _ = std::fs::create_dir_all(dir());
         let _ = std::fs::write(Self::path(), serde_json::to_vec(&r).unwrap_or_default());
     }
@@ -186,25 +246,9 @@ fn yes() -> bool {
     true
 }
 
-fn one() -> u32 {
-    1
-}
-
-/// The update interval's range, in hours: never more often than hourly (the server's catalog changes about that
-/// often), at least once a week.
-pub const MIN_HOURS: u32 = 1;
-pub const MAX_HOURS: u32 = 168;
-
-pub fn clamp_hours(h: f64) -> u32 {
-    if h.is_nan() {
-        return MIN_HOURS;
-    }
-    h.round().clamp(MIN_HOURS as f64, MAX_HOURS as f64) as u32
-}
-
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, update_hours: 1, selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true, ours_card_dismissed: false }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, auto_update_chosen: false, app_auto_update: true, app_auto_update_chosen: false, recent_updates: Vec::new(), selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true, ours_card_dismissed: false }
     }
 }
 
@@ -213,22 +257,44 @@ impl Config {
         dir().join("config.json")
     }
 
-    /// The update interval, kept in range whatever the file says.
-    pub fn hours(&self) -> u32 {
-        clamp_hours(self.update_hours as f64)
-    }
-
-    /// The interval from the window: a number, or the text typed (clamped; text that isn't a number keeps the
-    /// current one). Returns the interval now.
-    pub fn set_hours(&mut self, v: &serde_json::Value) -> u32 {
-        if let Some(h) = v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())) {
-            self.update_hours = clamp_hours(h);
-        }
-        self.hours()
-    }
-
     pub fn load() -> Config {
-        std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let mut c: Config = std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        if c.migrate() {
+            log("settings: \"Update the app by itself\" turned on (it was off only as an old default)");
+        }
+        c
+    }
+
+    /// Settings from older versions. Returns whether the app update switch was turned on.
+    /// - `app_auto_update` false without `app_auto_update_chosen` is not the player's choice: on.
+    /// - `auto_update` (the addons) has defaulted to on since the first version that had it (7349211), so a false in
+    ///   the file was always written by its switch: it is the player's and stays, now marked as chosen.
+    pub fn migrate(&mut self) -> bool {
+        if !self.auto_update && !self.auto_update_chosen {
+            self.auto_update_chosen = true;
+        }
+        if !self.app_auto_update && !self.app_auto_update_chosen {
+            self.app_auto_update = true;
+            return true;
+        }
+        false
+    }
+
+    /// The window's switches: the value, remembered as the player's choice.
+    pub fn set_auto_update(&mut self, on: bool) {
+        self.auto_update = on;
+        self.auto_update_chosen = true;
+    }
+
+    pub fn set_app_auto_update(&mut self, on: bool) {
+        self.app_auto_update = on;
+        self.app_auto_update_chosen = true;
+    }
+
+    /// Note an update done by itself (newest first, the list kept short).
+    pub fn note_recent(&mut self, u: RecentUpdate) {
+        self.recent_updates.insert(0, u);
+        self.recent_updates.truncate(RECENT_MAX);
     }
 
     pub fn save(&self) {
@@ -273,40 +339,78 @@ mod tests {
     }
 
     #[test]
-    fn update_hours_are_clamped() {
-        assert_eq!(clamp_hours(0.0), 1);
-        assert_eq!(clamp_hours(-5.0), 1);
-        assert_eq!(clamp_hours(1.0), 1);
-        assert_eq!(clamp_hours(2.4), 2);
-        assert_eq!(clamp_hours(2.6), 3);
-        assert_eq!(clamp_hours(168.0), 168);
-        assert_eq!(clamp_hours(1000.0), 168);
-        assert_eq!(clamp_hours(f64::NAN), 1);
-        assert_eq!(clamp_hours(f64::INFINITY), 168);
+    fn updates_are_on_by_default() {
+        let c = Config::default();
+        assert!(c.auto_update && c.app_auto_update);
+        assert!(!c.auto_update_chosen && !c.app_auto_update_chosen);
+        // a settings file from before either switch (or an empty one): both on
+        let old: Config = serde_json::from_str(r#"{"autostart_decided":true}"#).unwrap();
+        assert!(old.auto_update && old.app_auto_update);
+        assert_eq!(CHECK_EVERY, std::time::Duration::from_secs(600));
     }
 
     #[test]
-    fn update_hours_persist() {
-        // an old config.json without the field: hourly
-        let old: Config = serde_json::from_str(r#"{"auto_update": false}"#).unwrap();
-        assert_eq!((old.update_hours, old.hours(), old.auto_update), (1, 1, false));
-        // a hand-edited file out of range: kept in range
-        let wild: Config = serde_json::from_str(r#"{"update_hours": 9999}"#).unwrap();
-        assert_eq!(wild.hours(), 168);
-        let zero: Config = serde_json::from_str(r#"{"update_hours": 0}"#).unwrap();
-        assert_eq!(zero.hours(), 1);
-        // what save() writes, load() reads back
-        let c = Config { update_hours: 6, ..Default::default() };
-        let back: Config = serde_json::from_slice(&serde_json::to_vec_pretty(&c).unwrap()).unwrap();
-        assert_eq!(back.hours(), 6);
-        // from the window
+    fn migration_turns_on_only_what_the_player_did_not_choose() {
+        // an app-update false nobody chose (no _chosen): on
+        let mut c: Config = serde_json::from_str(r#"{"app_auto_update": false}"#).unwrap();
+        assert!(c.migrate());
+        assert!(c.app_auto_update && !c.app_auto_update_chosen);
+        assert!(!c.migrate(), "once is enough");
+        // the player switched it off in the window: stays off, also after a save and load
         let mut c = Config::default();
-        assert_eq!(c.set_hours(&serde_json::json!(12)), 12);
-        assert_eq!(c.set_hours(&serde_json::json!(" 3 ")), 3);
-        assert_eq!(c.set_hours(&serde_json::json!("lots")), 3);
-        assert_eq!(c.set_hours(&serde_json::json!(500)), 168);
-        assert_eq!(c.set_hours(&serde_json::json!(0)), 1);
-        assert_eq!(c.update_hours, 1);
+        c.set_app_auto_update(false);
+        let mut back: Config = serde_json::from_slice(&serde_json::to_vec_pretty(&c).unwrap()).unwrap();
+        assert!(!back.migrate());
+        assert!(!back.app_auto_update && back.app_auto_update_chosen);
+        // the addon switch always defaulted to on, so an old false is the player's: kept, and marked as chosen
+        let mut old: Config = serde_json::from_str(r#"{"auto_update": false}"#).unwrap();
+        assert!(!old.migrate());
+        assert!(!old.auto_update && old.auto_update_chosen);
+        let mut on: Config = serde_json::from_str(r#"{"auto_update": true}"#).unwrap();
+        on.migrate();
+        assert!(on.auto_update && !on.auto_update_chosen);
+        // switched back on in the window: on, and still chosen
+        old.set_auto_update(true);
+        assert!(old.auto_update && old.auto_update_chosen);
+        // an old file with the hours setting this version dropped still reads
+        let hours: Config = serde_json::from_str(r#"{"update_hours": 6, "auto_update": true}"#).unwrap();
+        assert!(hours.auto_update);
+    }
+
+    #[test]
+    fn checks_run_every_ten_minutes() {
+        use chrono::TimeZone;
+        let t0 = chrono::Local.with_ymd_and_hms(2026, 11, 21, 12, 0, 0).unwrap();
+        let first = std::time::Duration::from_secs(5);
+        let m = |n: i64| chrono::Duration::minutes(n);
+        // the first check soon after the start, then every ten minutes after the last one
+        assert_eq!(next_check(t0, None, t0, first, CHECK_EVERY), t0 + chrono::Duration::seconds(5));
+        assert_eq!(next_check(t0, Some(t0), t0 + m(3), first, CHECK_EVERY), t0 + m(10));
+        assert_eq!(next_check(t0, Some(t0 + m(10)), t0 + m(11), first, CHECK_EVERY), t0 + m(20));
+        // a PC that slept: due at once when it wakes
+        assert!(next_check(t0, Some(t0), t0 + m(90), first, CHECK_EVERY) < t0 + m(90));
+        // the clock set back an hour: ten minutes from now, not an hour and ten
+        assert_eq!(next_check(t0, Some(t0 + m(60)), t0, first, CHECK_EVERY), t0 + m(10));
+        // the real app ignores the test override
+        assert_eq!(check_every(), CHECK_EVERY);
+    }
+
+    #[test]
+    fn recent_updates_stay_short() {
+        let mut c = Config::default();
+        for i in 0..30 {
+            c.note_recent(RecentUpdate { at: String::new(), install: "WoW Forever".into(), name: format!("A{i}"), from: None, to: "1".into() });
+        }
+        assert_eq!(c.recent_updates.len(), RECENT_MAX);
+        assert_eq!(c.recent_updates[0].name, "A29");
+        let back: Config = serde_json::from_slice(&serde_json::to_vec(&c).unwrap()).unwrap();
+        assert_eq!(back.recent_updates, c.recent_updates);
+    }
+
+    #[test]
+    fn restart_note_from_an_older_version_still_reads() {
+        let r: Restart = serde_json::from_str(r#"{"window_open":true,"at":5}"#).unwrap();
+        assert!(r.window_open && r.to.is_empty());
     }
 
     #[test]

@@ -39,8 +39,6 @@ use worker::{Cmd, Kind, Shared, Status, Watcher};
 const DEFAULT_SERVER: &str = "https://everlookdb.com";
 const PRIVACY: &str = "Sends only the game facts in EverlookDB.lua and EverlookDBAuctions.lua";
 const AUTOSTART: &str = if cfg!(target_os = "macos") { "Open at login" } else { "Start with Windows" };
-/// how often the app checks for a new version of itself (the addon list follows the player's update_hours)
-const HOURLY: Duration = Duration::from_secs(3600);
 const HELP: &str = "EverlookDB: addon manager for World of Warcraft, and uploader of the EverlookDB addons' data to everlookdb.com.
 
 Usage: everlookdb-uploader [options]
@@ -376,20 +374,19 @@ fn run(args: Args) {
     let mut builder = tauri::Builder::default();
     // a test instance (its own settings folder) may run next to the real one, and never opens its window by itself
     let test_instance = std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_some_and(|v| !v.is_empty());
-    // the window opens at start only when the player started the app (not at login, not a development or test run);
-    // after that only when they click the tray icon
-    // after the app updated itself: the window opens again only if it was open, and never takes the focus
+    // the window never opens by itself: at start only when the player started the app (see show_at_start), after
+    // that only when they click the tray icon or start the app again
     let restart = config::Restart::take();
-    let show_at_start = match restart {
-        Some(r) => r.window_open && !test_instance,
-        None => !args.background && !test_instance && !cfg!(debug_assertions),
-    };
-    let focus_at_start = restart.is_none();
-    if let Some(r) = restart {
-        config::log(&format!("started after an update (window was {})", if r.window_open { "open" } else { "closed" }));
+    let show_at_start = show_at_start(args.background, restart.is_some(), test_instance, cfg!(debug_assertions));
+    if let Some(r) = &restart {
+        config::log(&format!("started after an update{}; the window stays closed", if r.to.is_empty() { String::new() } else { format!(" to {}", r.to) }));
+        let mut c = shared.cfg.lock().unwrap();
+        c.note_recent(config::RecentUpdate { at: now_rfc3339(), install: String::new(), name: "EverlookDB app".into(), from: None, to: env!("CARGO_PKG_VERSION").into() });
+        c.save();
     }
     if !test_instance {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app, true)));
+        // a second start is the player asking for the window
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)));
     }
     let app = builder
         .plugin(tauri_plugin_dialog::init())
@@ -428,7 +425,7 @@ fn run(args: Args) {
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            setup(app.handle(), shared, show_at_start, focus_at_start)?;
+            setup(app.handle(), shared, show_at_start)?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -459,7 +456,14 @@ fn autostart() -> tauri_plugin_autostart::Builder {
     b
 }
 
-fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri::Result<()> {
+/// Whether the window opens at start: only when the player started the app themselves. Never at login
+/// (`--background`), never after the app updated itself (`after_update`: it was started by the installer), never
+/// in a development or test run.
+fn show_at_start(background: bool, after_update: bool, test_instance: bool, debug: bool) -> bool {
+    !background && !after_update && !test_instance && !debug
+}
+
+fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> {
     let paused = shared.cfg.lock().unwrap().paused;
     // point the login item at this copy of the app (an update may have installed it somewhere new); only for the
     // real app, never a development or test run, which would take over the player's login item
@@ -506,7 +510,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
     tray.on_menu_event(|app, e| on_menu(app, e.id.as_ref()))
         .on_tray_icon_event(|tray, e| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-                show_window(tray.app_handle(), true);
+                show_window(tray.app_handle());
             }
         })
         .build(app)?;
@@ -583,22 +587,23 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool, focus: bool) -> tauri
     });
 
     if show {
-        show_window(app, focus);
+        show_window(app);
     }
-    spawn_hourly(app.clone());
+    spawn_addon_checks(app.clone());
     spawn_updater(app.clone());
     Ok(())
 }
 
-/// Show the window, creating it if it was closed, where it was last (centred the first time). `focus`: the player
-/// asked for it (tray, a second start); otherwise (after the app updated itself) it opens without taking the focus.
-fn show_window(app: &AppHandle, focus: bool) {
+/// Show the window, creating it if it was closed, where it was last (centred the first time). Only for the
+/// player's own clicks: the tray icon or menu, a second start, starting the app by hand. Nothing in the background
+/// (updates, checks, errors) ever calls this; their state waits in the window and the log (see the test
+/// no_background_path_shows_the_window).
+fn show_window(app: &AppHandle) {
+    config::log("window: shown (the player asked for it)");
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
-        if focus {
-            let _ = w.set_focus();
-        }
+        let _ = w.set_focus();
         return;
     }
     #[cfg(target_os = "macos")]
@@ -618,7 +623,7 @@ fn show_window(app: &AppHandle, focus: bool) {
         .min_inner_size(760.0, 520.0)
         .theme(Some(tauri::Theme::Dark))
         .background_color(tauri::window::Color(12, 20, 34, 255))
-        .focused(focus);
+        .focused(true);
     b = match last {
         Some(r) => b.inner_size(r.w, r.h).position(r.x, r.y),
         None => b.inner_size(1100.0, 740.0).center(),
@@ -715,7 +720,7 @@ fn show_status(app: &AppHandle, s: &Status, dir: Option<PathBuf>) {
 fn on_menu(app: &AppHandle, id: &str) {
     let ui = app.state::<Ui>();
     match id {
-        "window" => show_window(app, true),
+        "window" => show_window(app),
         "upload" => ui.send(Cmd::UploadNow),
         "site" => {
             let _ = app.opener().open_url(format!("{}/contribute.html", ui.shared.server), None::<&str>);
@@ -783,11 +788,13 @@ struct AppState {
     installs: Vec<wow::Install>,
     selected: Option<String>,
     auto_update: bool,
+    app_auto_update: bool,
+    /// the app's own update, in a few words ("0.7.5 installs when this window is closed"), when there is one
+    app_update: Option<String>,
+    /// updates done by themselves, newest first
+    recent_updates: Vec<config::RecentUpdate>,
     shared_prices: bool,
     shared: shared::View,
-    update_hours: u32,
-    min_hours: u32,
-    max_hours: u32,
     autostart: bool,
     autostart_label: &'static str,
     uploads: UploadState,
@@ -835,7 +842,6 @@ fn find_install(ui: &Ui, id: &str) -> Result<wow::Install, String> {
 fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
     let list = installs(&ui);
     let cfg = ui.shared.cfg.lock().unwrap().clone();
-    let hours = cfg.hours();
     let selected = cfg.selected.filter(|s| list.iter().any(|i| &i.id == s)).or_else(|| {
         // WoW Forever first: it is what EverlookDB is for
         list.iter().find(|i| i.flavor == "forever").or(list.first()).map(|i| i.id.clone())
@@ -846,11 +852,11 @@ fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
         installs: list,
         selected,
         auto_update: cfg.auto_update,
+        app_auto_update: cfg.app_auto_update,
+        app_update: APP_UPDATE.lock().unwrap().clone(),
+        recent_updates: cfg.recent_updates.clone(),
         shared_prices: cfg.shared_prices,
         shared: ui.shared_view.lock().unwrap().clone(),
-        update_hours: hours,
-        min_hours: config::MIN_HOURS,
-        max_hours: config::MAX_HOURS,
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         autostart_label: AUTOSTART,
         uploads: ui.uploads.lock().unwrap().clone(),
@@ -1499,16 +1505,14 @@ fn forget_folder(app: AppHandle, ui: State<Ui>, root: String) {
 #[tauri::command(async)]
 fn set_setting(app: AppHandle, ui: State<Ui>, name: String, value: serde_json::Value) -> Result<(), String> {
     match name.as_str() {
-        "update_hours" => {
-            let mut c = ui.shared.cfg.lock().unwrap();
-            c.set_hours(&value);
-            c.save();
-            drop(c);
-            let _ = app.emit("settings", ());
-        }
         "auto_update" => {
             let mut c = ui.shared.cfg.lock().unwrap();
-            c.auto_update = value.as_bool().unwrap_or(true);
+            c.set_auto_update(value.as_bool().unwrap_or(true));
+            c.save();
+        }
+        "app_auto_update" => {
+            let mut c = ui.shared.cfg.lock().unwrap();
+            c.set_app_auto_update(value.as_bool().unwrap_or(true));
             c.save();
         }
         "shared_prices" => {
@@ -1568,12 +1572,13 @@ fn open_addons_folder(app: AppHandle, ui: State<Ui>, install: String, folder: Op
 // ---------------------------------------------------------------------------------------------------------------
 // Background
 
-/// Refresh the catalog soon after start and then every `update_hours` (the player's setting, at least an hour); when
-/// automatic updates are on, update what we installed. A changed interval counts from the last check, without a
-/// restart.
-fn spawn_hourly(app: AppHandle) {
+/// Refresh the catalog soon after start and then every CHECK_EVERY (10 minutes); when "Update my addons by itself"
+/// is on, update what we installed, without asking. Updates for a game that is running wait until it is closed
+/// (looked at every 30 seconds), then go in. Nothing here ever shows or focuses the window: what happened goes in
+/// the log, the footer line and the "updated by itself" list for when the player opens it.
+fn spawn_addon_checks(app: AppHandle) {
     std::thread::spawn(move || {
-        // the wall clock, so a PC that slept through the hour checks when it wakes
+        // the wall clock, so a PC that slept through a check checks when it wakes
         let started = chrono::Local::now();
         let mut last: Option<chrono::DateTime<chrono::Local>> = None;
         let mut first = true;
@@ -1581,19 +1586,12 @@ fn spawn_hourly(app: AppHandle) {
         let mut waiting: Vec<String> = Vec::new();
         let mut look_again = started;
         loop {
-            let hours = app.state::<Ui>().shared.cfg.lock().unwrap().hours();
+            let every = config::check_every();
             let now = chrono::Local::now();
-            // the clock was set back: count from now
-            if last.is_some_and(|t| t > now + chrono::Duration::minutes(1)) {
-                last = Some(now);
-            }
-            let due = match last {
-                None => started + chrono::Duration::seconds(5),
-                Some(t) => t + chrono::Duration::hours(i64::from(hours)),
-            };
+            let due = config::next_check(started, last, now, Duration::from_secs(5), every);
             if now < due {
                 if !waiting.is_empty() && now >= look_again {
-                    look_again = now + chrono::Duration::minutes(5);
+                    look_again = now + chrono::Duration::from_std(WAIT_FOR_GAME).unwrap_or_default();
                     let ui = app.state::<Ui>();
                     let auto = ui.shared.cfg.lock().unwrap().auto_update;
                     if let (true, Some(cat)) = (auto, ui.catalog()) {
@@ -1607,14 +1605,13 @@ fn spawn_hourly(app: AppHandle) {
                         waiting.clear();
                     }
                 }
-                // look at the setting again now and then, so a new interval takes effect
                 let left = (due - now).to_std().unwrap_or_default();
-                std::thread::sleep(left.min(Duration::from_secs(15)));
+                std::thread::sleep(left.min(Duration::from_secs(5)));
                 continue;
             }
             last = Some(now);
             let ui = app.state::<Ui>();
-            let next = chrono::Local::now() + chrono::Duration::hours(i64::from(hours));
+            let next = chrono::Local::now() + chrono::Duration::from_std(every).unwrap_or_default();
             ui.catalog.lock().unwrap().next = Some(next.to_rfc3339_opts(chrono::SecondsFormat::Secs, false));
             // the window may have just loaded it
             refresh_catalog(&ui, first.then(|| Duration::from_secs(60)));
@@ -1628,11 +1625,14 @@ fn spawn_hourly(app: AppHandle) {
             }
             let (out, still) = auto_update(&app, &installs(&ui), &cat);
             waiting = still;
-            look_again = chrono::Local::now() + chrono::Duration::minutes(5);
+            look_again = chrono::Local::now() + chrono::Duration::from_std(WAIT_FOR_GAME).unwrap_or_default();
             note_auto(&app, false, &out, &waiting, &cat);
         }
     });
 }
+
+/// How often an update waiting for the game to close looks whether it has.
+const WAIT_FOR_GAME: Duration = Duration::from_secs(30);
 
 /// The automatic update of `targets`, except installs whose game is running (replacing an addon's files under a
 /// running game can mix two versions): those are returned, to be tried again once the game is closed.
@@ -1657,73 +1657,284 @@ fn note_auto(app: &AppHandle, off: bool, out: &Updated, waiting: &[String], cat:
     } else {
         config::log(&format!("auto-update: checked, {} updated, {} failed, {} waiting for the game to close", out.changes.len(), out.failed.len(), waiting_n));
     }
-    let _ = app.emit("catalog", ());
     for f in &out.failed {
         config::log(&format!("auto-update failed: {}: {}", f.id, f.message));
     }
+    if !out.changes.is_empty() {
+        let mut c = ui.shared.cfg.lock().unwrap();
+        for ch in &out.changes {
+            config::log(&format!("auto-update: updated {} {} to {} ({})", ch.name, ch.from.as_deref().unwrap_or("?"), ch.to, ch.install));
+            c.note_recent(config::RecentUpdate { at: now_rfc3339(), install: ch.install.clone(), name: ch.name.clone(), from: ch.from.clone(), to: ch.to.clone() });
+        }
+        c.save();
+    }
+    let _ = app.emit("catalog", ());
     if !out.changes.is_empty() || !out.failed.is_empty() {
+        // only an open window hears these (a quiet notice in the page); a closed window stays closed
+        let _ = app.emit("settings", ());
         let _ = app.emit("updated", out.clone());
     }
 }
 
-/// Check for a new version of the app a minute after start and then every hour; download it, wait until no addon
-/// change and no upload is running, then install it silently and restart. The window comes back only if it was open,
-/// where it was, without taking the focus (config::Restart).
-fn spawn_updater(app: AppHandle) {
-    if cfg!(debug_assertions) {
-        return;
+/// The app's own update, for the window (get_state): None when there is none.
+static APP_UPDATE: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_app_update(app: &AppHandle, note: Option<String>) {
+    let mut n = APP_UPDATE.lock().unwrap();
+    if *n != note {
+        *n = note;
+        drop(n);
+        let _ = app.emit("settings", ());
     }
+}
+
+/// The window as the app's own update sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WindowNow {
+    /// not there (closed to the tray, or never opened)
+    Closed,
+    Hidden,
+    Minimized,
+    Shown,
+}
+
+fn window_now(app: &AppHandle) -> WindowNow {
+    match app.get_webview_window("main") {
+        None => WindowNow::Closed,
+        Some(w) if !w.is_visible().unwrap_or(false) => WindowNow::Hidden,
+        Some(w) if w.is_minimized().unwrap_or(false) => WindowNow::Minimized,
+        Some(_) => WindowNow::Shown,
+    }
+}
+
+/// Whether the app may install its update now. Never while the player has the window (shown, or minimized on the
+/// taskbar): the restart would take it away from under them, and the new version never opens a window by itself.
+/// Never while an addon change or an upload runs (`busy`). So it goes in once the window is closed, quietly.
+fn may_install_app_update(window: WindowNow, busy: bool) -> bool {
+    matches!(window, WindowNow::Closed | WindowNow::Hidden) && !busy
+}
+
+/// Check for a new version of the app 30 seconds after start and then every CHECK_EVERY (10 minutes). When "Update
+/// the app by itself" is on: download it (the updater checks its signature against the public key in
+/// tauri.conf.json), wait until the window is closed and nothing is running (may_install_app_update), then install
+/// it silently; the installer starts the new version, which stays in the tray (config::Restart, show_at_start).
+/// Nothing here asks the player anything or shows the window. A development build or a test instance only checks.
+fn spawn_updater(app: AppHandle) {
+    let test_instance = std::env::var_os("EVERLOOKDB_UPLOADER_DIR").is_some_and(|v| !v.is_empty());
+    let may_install = !cfg!(debug_assertions) && !test_instance;
     std::thread::spawn(move || {
-        let mut wait = Duration::from_secs(60);
+        let started = chrono::Local::now();
+        let mut last: Option<chrono::DateTime<chrono::Local>> = None;
+        // downloaded and checked, waiting for its moment
+        let mut ready: Option<(tauri_plugin_updater::Update, Vec<u8>)> = None;
+        // ticks in a row that may_install_app_update said yes (two, 5 s apart, before it goes in)
+        let mut quiet = 0;
+        let mut waiting_logged = false;
         loop {
-            std::thread::sleep(wait);
-            wait = HOURLY;
-            let found = tauri::async_runtime::block_on(async {
-                let Some(update) = app.updater()?.check().await? else { return Ok(None) };
-                config::log(&format!("downloading the update to {}", update.version));
-                let bytes = update.download(|_, _| {}, || {}).await?;
-                Ok::<_, tauri_plugin_updater::Error>(Some((update, bytes)))
-            });
-            let (update, bytes) = match found {
-                Ok(Some(f)) => f,
-                Ok(None) => continue,
-                Err(e) => {
-                    config::log(&format!("update check failed: {e}"));
-                    continue;
+            let on = app.state::<Ui>().shared.cfg.lock().unwrap().app_auto_update;
+            let now = chrono::Local::now();
+            if now >= config::next_check(started, last, now, Duration::from_secs(30), config::check_every()) {
+                last = Some(now);
+                let have = ready.as_ref().map(|(u, _)| u.version.clone());
+                match check_app_update(&app, on && may_install, have.as_deref()) {
+                    Ok(Some(found)) => {
+                        ready = Some(found);
+                        waiting_logged = false;
+                    }
+                    Ok(None) => {}
+                    Err(e) => config::log(&format!("app update: check failed: {e}")),
                 }
-            };
-            // idle twice in a row, a few seconds apart, then hold every addon change off while the installer runs
-            let mut quiet = 0;
-            let hold = loop {
-                if manager::idle() && !worker::uploading() {
-                    quiet += 1;
-                } else {
-                    quiet = 0;
+            }
+            if !on && ready.take().is_some() {
+                config::log("app update: \"Update the app by itself\" was turned off; the downloaded update is dropped");
+                set_app_update(&app, None);
+            }
+            if let Some((update, _)) = &ready {
+                let window = window_now(&app);
+                let busy = !manager::idle() || worker::uploading();
+                quiet = if may_install_app_update(window, busy) { quiet + 1 } else { 0 };
+                if quiet == 0 && !waiting_logged && matches!(window, WindowNow::Shown | WindowNow::Minimized) {
+                    config::log(&format!("app update: {} is ready; it installs once the window is closed", update.version));
+                    set_app_update(&app, Some(format!("Version {} installs by itself once this window is closed", update.version)));
+                    waiting_logged = true;
                 }
                 if quiet >= 2 {
-                    if let Some(h) = manager::hold() {
-                        if !worker::uploading() {
-                            break h;
-                        }
+                    quiet = 0;
+                    if let Some((update, bytes)) = ready.take() {
+                        ready = install_app_update(&app, update, bytes);
                     }
                 }
-                std::thread::sleep(Duration::from_secs(5));
-            };
-            remember_window(&app);
-            save_window(&app);
-            let open = app.get_webview_window("main").is_some_and(|w| w.is_visible().unwrap_or(false));
-            config::Restart::write(open);
-            config::log(&format!("installing the update to {}", update.version));
-            match update.install(bytes) {
-                Ok(()) => {
-                    drop(hold);
-                    app.restart();
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(config::dir().join("restart.json"));
-                    config::log(&format!("update install failed: {e}"));
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+}
+
+/// One check. `download`: get (and verify) a new version, unless it is the one already `have`. Ok(Some) is a
+/// downloaded update; every outcome has a log line.
+fn check_app_update(
+    app: &AppHandle,
+    download: bool,
+    have: Option<&str>,
+) -> Result<Option<(tauri_plugin_updater::Update, Vec<u8>)>, tauri_plugin_updater::Error> {
+    tauri::async_runtime::block_on(async {
+        let Some(update) = app.updater()?.check().await? else {
+            config::log(&format!("app update: checked, {} is the newest", env!("CARGO_PKG_VERSION")));
+            set_app_update(app, None);
+            return Ok(None);
+        };
+        if have == Some(update.version.as_str()) {
+            config::log(&format!("app update: checked, {} already downloaded", update.version));
+            return Ok(None);
+        }
+        if !download {
+            let on = app.state::<Ui>().shared.cfg.lock().unwrap().app_auto_update;
+            let why = if on { "a development build or test instance never installs" } else { "updating the app by itself is off" };
+            config::log(&format!("app update: checked, {} is out ({why})", update.version));
+            set_app_update(app, Some(format!("Version {} is out", update.version)));
+            return Ok(None);
+        }
+        config::log(&format!("app update: downloading {}", update.version));
+        let bytes = update.download(|_, _| {}, || {}).await?;
+        config::log(&format!("app update: {} downloaded and its signature checked", update.version));
+        Ok(Some((update, bytes)))
+    })
+}
+
+/// Hold every addon change off and install. On Windows a working install ends this process (the installer starts
+/// the new version); an update that couldn't start is handed back, to try again at the next quiet moment.
+fn install_app_update(app: &AppHandle, update: tauri_plugin_updater::Update, bytes: Vec<u8>) -> Option<(tauri_plugin_updater::Update, Vec<u8>)> {
+    let Some(hold) = manager::hold() else { return Some((update, bytes)) };
+    if worker::uploading() || !may_install_app_update(window_now(app), false) {
+        return Some((update, bytes));
+    }
+    save_window(app);
+    config::Restart::write(&update.version);
+    config::log(&format!("app update: installing {} quietly", update.version));
+    match update.install(&bytes) {
+        Ok(()) => {
+            drop(hold);
+            // macOS and Linux: the new version is in place; start it (it stays in the tray)
+            app.restart();
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(config::dir().join("restart.json"));
+            config::log(&format!("app update: install failed: {e}"));
+            set_app_update(app, Some(format!("Version {} couldn't be installed; it is tried again later", update.version)));
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_opens_at_start_only_when_the_player_started_the_app() {
+        // started by hand (Start menu, desktop shortcut)
+        assert!(show_at_start(false, false, false, false));
+        // at login
+        assert!(!show_at_start(true, false, false, false));
+        // by the installer after the app updated itself: never, whatever the window was before
+        assert!(!show_at_start(false, true, false, false));
+        assert!(!show_at_start(true, true, false, false));
+        // a test instance or a development build
+        assert!(!show_at_start(false, false, true, false));
+        assert!(!show_at_start(false, false, false, true));
+    }
+
+    #[test]
+    fn the_app_update_waits_while_the_window_is_open() {
+        assert!(may_install_app_update(WindowNow::Closed, false));
+        assert!(may_install_app_update(WindowNow::Hidden, false));
+        assert!(!may_install_app_update(WindowNow::Shown, false));
+        assert!(!may_install_app_update(WindowNow::Minimized, false));
+        // an addon change or an upload is running
+        assert!(!may_install_app_update(WindowNow::Closed, true));
+    }
+
+    /// The top-level function each line of main.rs is in (before the tests).
+    fn functions_of_lines(src: &str) -> Vec<(String, String)> {
+        let body = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        let mut current = String::new();
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let t = line.strip_prefix("async ").unwrap_or(line);
+            if let Some(rest) = t.strip_prefix("fn ") {
+                current = rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("").to_string();
+            }
+            out.push((current.clone(), line.to_string()));
+        }
+        out
+    }
+
+    /// Nothing that runs by itself (update checks, installs, errors, the tray's status) shows, focuses or creates
+    /// the window or opens a dialog: only the player's own clicks and starts do.
+    #[test]
+    fn no_background_path_shows_the_window() {
+        let src = &include_str!("main.rs").replace("\r\n", "\n");
+        // what may show a window or a dialog, and the only places allowed to
+        let tokens = ["show_window(", ".show()", ".show(|", "set_focus", "unminimize", "WebviewWindowBuilder::new", ".dialog()", "message(&", "request_user_attention", "always_on_top"];
+        let allowed = [
+            // the single-instance plugin: the player started the app again
+            "run",
+            // at start, only when show_at_start says so
+            "setup",
+            "show_window",
+            // the tray menu's "Open EverlookDB" and "Change WoW folder…"
+            "on_menu",
+            "pick_folder",
+            "message",
+            // the window's own buttons
+            "save_addon_list",
+            "add_folder",
+        ];
+        for (f, line) in functions_of_lines(src) {
+            if line.trim_start().starts_with("//") || line.trim_start().starts_with("use ") {
+                continue;
+            }
+            for t in tokens {
+                if line.contains(t) {
+                    assert!(allowed.contains(&f.as_str()), "{f} may show a window: {line}");
                 }
             }
         }
-    });
+        // setup shows it only behind `if show`, and the tray only on a click
+        assert!(src.contains("    if show {\n        show_window(app);\n    }"));
+        assert!(src.contains("MouseButtonState::Up, .. } = e {\n                show_window(tray.app_handle());"));
+        // pick_folder and message are reached only from the tray menu
+        for (f, line) in functions_of_lines(src) {
+            if line.contains(" pick_folder(app)") {
+                assert_eq!(f, "on_menu", "{line}");
+            }
+            if line.contains("message(&") && !line.trim_start().starts_with("fn ") {
+                assert_eq!(f, "pick_folder", "{line}");
+            }
+        }
+        // the other modules never touch a window
+        for (name, other) in [
+            ("addons", include_str!("addons.rs")),
+            ("catalog", include_str!("catalog.rs")),
+            ("config", include_str!("config.rs")),
+            ("github", include_str!("github.rs")),
+            ("manager", include_str!("manager.rs")),
+            ("ours", include_str!("ours.rs")),
+            ("report", include_str!("report.rs")),
+            ("shared", include_str!("shared.rs")),
+            ("worker", include_str!("worker.rs")),
+            ("wow", include_str!("wow.rs")),
+            ("giveaway", include_str!("giveaway.rs")),
+            ("icons", include_str!("icons.rs")),
+        ] {
+            for t in ["get_webview_window", "WebviewWindowBuilder", "set_focus", "unminimize", ".dialog()", "show_window"] {
+                assert!(!other.contains(t), "{name}.rs uses {t}");
+            }
+        }
+        // the window config: no window made by tauri.conf.json itself (it would open at every start)
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["app"]["windows"], serde_json::json!([]));
+        // and the update installs with no installer window
+        assert_eq!(conf["plugins"]["updater"]["windows"]["installMode"], "quiet");
+    }
 }

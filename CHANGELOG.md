@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The app never pops up on its own any more. It checks every 10 minutes and updates itself and your addons quietly; you can switch either off in Settings.
+
 ## v0.7.4 (2026-11-21)
 
 - The Price Feed checks for new scans once a minute instead of every 15 minutes, so a scan someone uploads is in your game folder within about a minute. A check is one tiny request for all your auction houses at once ("anything new?"); only a house with a newer scan is downloaded, and nothing is written when nothing changed. After errors it waits longer (2, 4, 8, then 15 minutes, or what the server asks) and then goes back to once a minute. The log has a line when something new arrives and a short summary every 15 minutes otherwise.

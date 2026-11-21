@@ -14,8 +14,12 @@ A small, ad-free addon manager for World of Warcraft (Windows and macOS), and th
   link (Install from GitHub), shown before it installs and then updated like the others.
 - **Our addons in one click.** A new install shows the EverlookDB addons, all ticked, with one Install all button
   ("Not now" hides it for good); Get addons has an EverlookDB addons filter with Install all missing.
-- **Keeps them updated.** One click to install, update, go back to the previous version or remove. Every hour (or
-  as often as you set, up to once a week) it updates what it installed by itself (one switch turns that off), and tells you what changed (v427.8 → v427.9).
+- **Keeps them updated.** One click to install, update, go back to the previous version or remove. Every 10 minutes
+  it checks and updates what it installed by itself, without asking ("Update my addons by itself" turns that off);
+  an addon for a game that is running is updated the moment the game closes. The window lists what changed
+  (v427.8 → v427.9) for when you open it.
+- **Never pops up.** The window opens only when you click the tray icon or start the app yourself: never at login,
+  never after an update, never for an error. The app updates itself the same quiet way ("Update the app by itself").
 - **Uploads EverlookDB data**, exactly as the EverlookDB Uploader did: see below.
 
 No ads, no account, no tracking. It lives in the tray (Windows) or the menu bar (macOS); click the icon to open the
@@ -97,7 +101,9 @@ If it can't be sent, the report is kept in `reports/` in the settings folder.
 Its settings, the addon records, the cached catalog, kept zips and a small log stay on your computer, in
 `%APPDATA%\com.everlookdb.uploader` (Windows) or `~/Library/Application Support/com.everlookdb.uploader` (macOS).
 App updates are checked at `https://everlookdb.com/uploader/latest.json` and downloaded from this repository's
-releases; they are signed, and the app refuses an update whose signature doesn't match.
+releases (every 10 minutes and 30 seconds after start); they are signed, and the app refuses an update whose
+signature doesn't match. A new version installs silently once the window is closed (never while it is open or
+minimized, nor during an addon change or an upload) and the new version starts in the tray.
 
 ## Tray menu
 
@@ -120,7 +126,8 @@ everlookdb-uploader --send-report [--test] [--what <text>]
 
 For testing: `EVERLOOKDB_UPLOADER_DIR` moves the settings folder (a copy started with it may run next to the real
 one and never opens its window by itself; click its tray icon), `EVERLOOKDB_WOW_ROOTS` replaces game detection with
-a list of folders, and `EVERLOOKDB_CATALOG` points the catalog at another URL or a local JSON file. `EVERLOOKDB_GIVEAWAY=1` shows the giveaway code under
+a list of folders, and `EVERLOOKDB_CATALOG` points the catalog at another URL or a local JSON file. `EVERLOOKDB_CHECK_EVERY=<seconds>` (test instance only, at least 10) checks for updates more often than
+every 10 minutes. A test instance or a development build checks for app updates but never installs one. `EVERLOOKDB_GIVEAWAY=1` shows the giveaway code under
 Uploads even while it is switched off (`=0` hides it). Development builds
 fall back to `src-tauri/fixtures/catalog-sample.json` while the server catalog isn't reachable.
 

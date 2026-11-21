@@ -75,18 +75,20 @@
       </section>
       <section class="settings" aria-label="Settings">
         <label class="switch">
+          <input type="checkbox" id="sw-app-auto" role="switch">
+          <span class="track" aria-hidden="true"></span>
+          <span class="switch-label">Update the app by itself</span>
+        </label>
+        <label class="switch">
           <input type="checkbox" id="sw-auto" role="switch">
           <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">Update addons by itself</span>
+          <span class="switch-label">Update my addons by itself</span>
         </label>
-        <div class="every" role="group" aria-labelledby="every-label">
-          <span id="every-label">Check every</span>
-          <span class="stepper">
-            <button type="button" id="hours-less" aria-label="One hour less" tabindex="-1">−</button>
-            <input type="text" id="hours" inputmode="numeric" maxlength="3" autocomplete="off" spellcheck="false" aria-label="Hours between checks for addon updates">
-            <button type="button" id="hours-more" aria-label="One hour more" tabindex="-1">+</button>
-          </span>
-          <span id="hours-unit">hours</span>
+        <p class="fine every-note">Checks for updates every 10 minutes</p>
+        <p class="fine" id="app-update" hidden></p>
+        <div class="recent" id="recent" hidden>
+          <h3 class="recent-title">Updated by itself</h3>
+          <ul id="recent-list"></ul>
         </div>
         <label class="switch">
           <input type="checkbox" id="sw-start" role="switch">
