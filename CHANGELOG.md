@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Price Feed: finds your auction houses again after today's WoW Forever client update, which stopped telling addons the realm's name: the houses are now also matched by the realm ID in your saved scans.
 - An auctions file whose scans the server refused for what they say (no realm, too old) is no longer sent again every hour and logged as a new error each time: it's sent again when the file changes, which is when the game has saved something new. A file the server couldn't read at all is still tried hourly.
 
 ## v0.7.3 (2026-11-21)

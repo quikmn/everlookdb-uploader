@@ -78,7 +78,9 @@ pub struct View {
 // ---------------------------------------------------------------------------------------------------------------
 // Which houses
 
-/// Realm name -> the sides seen for it (empty: not known, so every side).
+/// Realm name -> the sides seen for it (empty: not known, so every side). A realm known only by its ID (the scans'
+/// `realmID`: since WoW Forever's 2026-11-21 client the game no longer tells addons the realm's name) is keyed
+/// `#<id>` (see `id_key`).
 pub fn wanted(forever: &Path) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let Ok(accounts) = std::fs::read_dir(forever.join("WTF").join("Account")) else { return out };
@@ -92,8 +94,12 @@ pub fn wanted(forever: &Path) -> BTreeMap<String, BTreeSet<String>> {
             }
         }
         if let Ok(text) = std::fs::read(a.path().join("SavedVariables").join("EverlookDBAuctions.lua")) {
-            for (realm, side) in saved_houses(&String::from_utf8_lossy(&text)) {
+            let text = String::from_utf8_lossy(&text);
+            for (realm, side) in saved_houses(&text) {
                 out.entry(realm).or_default().insert(side);
+            }
+            for id in saved_realm_ids(&text) {
+                out.entry(id_key(id)).or_default();
             }
         }
     }
@@ -118,6 +124,19 @@ pub fn saved_houses(text: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The `wanted` key of a realm known only by its ID.
+fn id_key(id: i64) -> String {
+    format!("#{id}")
+}
+
+/// The realm IDs of the Auctions addon's saved scans (`["realmID"] = 6946,` lines).
+pub fn saved_realm_ids(text: &str) -> BTreeSet<i64> {
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("[\"realmID\"] = ")?.strip_suffix(',')?.trim().parse::<i64>().ok())
+        .filter(|id| (1..10_000_000).contains(id))
+        .collect()
+}
+
 /// The server's houses (GET /api/v1/auctions) the player uses: their keys, newest scan first. A realm with known
 /// sides gets those and its neutral house.
 pub fn pick(list: &Value, wanted: &BTreeMap<String, BTreeSet<String>>) -> Vec<String> {
@@ -127,7 +146,8 @@ pub fn pick(list: &Value, wanted: &BTreeMap<String, BTreeSet<String>>) -> Vec<St
         if !key_ok(key) {
             continue;
         }
-        if let Some(sides) = wanted.get(realm) {
+        let by_id = h["realm_id"].as_i64().and_then(|id| wanted.get(&id_key(id)));
+        if let Some(sides) = wanted.get(realm).or(by_id) {
             if sides.is_empty() || sides.contains(side) || side == "Neutral" {
                 out.push(key.to_string());
             }
@@ -773,6 +793,28 @@ mod tests {
         want.entry("CAMWOW EU5 Realm 4 PvP".into()).or_default().insert("Alliance".into());
         want.entry("Fresh".into()).or_default(); // a realm folder, side unknown
         assert_eq!(pick(&list, &want), vec!["EU-6946-Alliance", "EU-6946-Neutral", "EU-7-Horde"]);
+
+        // scans that know only the realm ID (the house key "-Alliance"): the houses of that ID
+        let saved = "[\"houses\"] = {
+[\"-Alliance\"] = {
+},
+},
+[\"scans\"] = {
+{
+[\"realmID\"] = 6946,
+},
+{
+[\"realmID\"] = 0,
+},
+},";
+        assert!(saved_houses(saved).is_empty());
+        assert_eq!(saved_realm_ids(saved), BTreeSet::from([6946]));
+        let list = json!({ "houses": [
+            { "key": "EU-6946-Alliance", "realm": "CAMWOW EU5 Realm 4 PvP", "realm_id": 6946, "side": "Alliance" },
+            { "key": "EU-7-Horde", "realm": "Fresh", "realm_id": 7, "side": "Horde" },
+        ]});
+        let want: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([(id_key(6946), BTreeSet::new())]);
+        assert_eq!(pick(&list, &want), vec!["EU-6946-Alliance"]);
     }
 
     fn game(name: &str) -> (PathBuf, PathBuf) {
