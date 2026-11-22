@@ -146,6 +146,13 @@ pub struct Config {
     /// the player said "Not now" to the welcome card that installs our addons (ours.rs); it never shows again
     #[serde(default)]
     pub ours_card_dismissed: bool,
+    /// a random secret made once on this PC for the disenchant uploads (delog.rs): the install token the server sees
+    /// is derived from it, and the entry ids are hashed with it. The secret itself is never sent.
+    #[serde(default)]
+    pub crowd_secret: String,
+    /// "<server>|<file path>" -> the time of the newest logged disenchant the server took from that file
+    #[serde(default)]
+    pub de_sent: BTreeMap<String, i64>,
 }
 
 /// A window's place and inner size, in logical pixels.
@@ -248,7 +255,7 @@ fn yes() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, auto_update_chosen: false, app_auto_update: true, app_auto_update_chosen: false, recent_updates: Vec::new(), selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true, ours_card_dismissed: false }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, auto_update_chosen: false, app_auto_update: true, app_auto_update_chosen: false, recent_updates: Vec::new(), selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true, ours_card_dismissed: false, crowd_secret: String::new(), de_sent: BTreeMap::new() }
     }
 }
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New: disenchant odds measured by players. The disenchants EverlookDB Auctions logs are shared, and the Price Feed brings everyone’s results back into the game.
+
 ## v0.7.5 (2026-11-21)
 
 - The app never pops up on its own any more. It updates itself and your addons quietly; you can switch either off in Settings.

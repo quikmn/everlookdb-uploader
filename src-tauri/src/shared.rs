@@ -26,6 +26,7 @@
 // the house. There are no player names in the data (the server has none to send).
 
 use crate::config;
+use crate::delog::ODDS_FILE;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -400,12 +401,22 @@ fn prune(dir: &Path, keep: &[String]) -> std::io::Result<bool> {
 /// shipped empty copy when that is what is there. Writes only files whose content changed and removes only house
 /// files the app wrote earlier. Returns whether anything changed.
 pub fn write_addon(addons: &Path, houses: &[&House], now: i64) -> std::io::Result<bool> {
+    write_feed(addons, houses, None, now)
+}
+
+/// `write_addon`, with the players' disenchant odds (DEOdds.lua, see delog.rs) when there are any; without them an
+/// earlier DEOdds.lua the app wrote is removed.
+pub fn write_feed(addons: &Path, houses: &[&House], odds: Option<&str>, now: i64) -> std::io::Result<bool> {
     let dir = addons.join(FOLDER);
     std::fs::create_dir_all(&dir)?;
     let mut changed = false;
-    let names: Vec<String> = houses.iter().map(|h| file_of(&h.key)).collect();
+    let mut names: Vec<String> = houses.iter().map(|h| file_of(&h.key)).collect();
     for h in houses {
         changed |= put(&dir, &file_of(&h.key), &house_lua(h))?;
+    }
+    if let Some(o) = odds {
+        changed |= put(&dir, ODDS_FILE, o)?;
+        names.push(ODDS_FILE.to_string());
     }
     // Shared.lua's time only moves when a house file did, so an unchanged poll writes nothing at all; the empty copy's
     // Shared.lua (after a CurseForge update, or the feed was off) is replaced
@@ -636,6 +647,41 @@ fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// GET /api/v1/crowd/disenchant with the ETag we have: Some(odds) when there is a new answer, None when it is the
+/// same (304) or the server doesn't have it yet (404).
+fn fetch_odds(http: &reqwest::blocking::Client, server: &str, etag: Option<&str>) -> Result<Option<Odds>, Fail> {
+    let a = get(http, &format!("{server}/api/v1/crowd/disenchant"), etag)?;
+    match a.code {
+        304 | 404 | 405 => Ok(None),
+        200 => {
+            let v: Value = serde_json::from_slice(&a.body).map_err(|_| Fail::new("a bad answer"))?;
+            let lua = crate::delog::odds_lua(&v, MARK).ok_or_else(|| Fail::new("a bad answer"))?;
+            Ok(Some(Odds { lua, etag: a.etag }))
+        }
+        _ => Err(fail_of(&a)),
+    }
+}
+
+fn odds_path() -> PathBuf {
+    config::cache_dir().join("deodds.json")
+}
+
+/// The odds kept from an earlier run (checked again on the way in).
+fn load_odds() -> Option<Odds> {
+    let v: Value = serde_json::from_slice(&std::fs::read(odds_path()).ok()?).ok()?;
+    let lua = v["lua"].as_str().filter(|l| l.starts_with(MARK) && l.contains("EverlookDB_DEOdds = "))?.to_string();
+    Some(Odds { lua, etag: v["etag"].as_str().map(str::to_string) })
+}
+
+fn save_odds(o: &Odds) {
+    let p = odds_path();
+    let _ = std::fs::create_dir_all(p.parent().unwrap());
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec(&serde_json::json!({ "etag": o.etag, "lua": o.lua })).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
+}
+
 /// The houses in memory and what the last refresh did.
 pub struct Poller {
     http: reqwest::blocking::Client,
@@ -656,26 +702,39 @@ pub struct Poller {
     /// unchanged checks since the last summary line in the log, and when that was
     quiet: u32,
     quiet_logged: Option<Instant>,
+    /// the players' disenchant odds (DEOdds.lua), and when they were last asked
+    odds: Option<Odds>,
+    odds_asked: Option<Instant>,
+}
+
+/// The disenchant odds as written (DEOdds.lua) and the ETag of the answer they came from.
+#[derive(Clone, Debug, PartialEq)]
+struct Odds {
+    lua: String,
+    etag: Option<String>,
 }
 
 struct Written {
     toc: String,
     keys: Vec<String>,
+    /// DEOdds.lua was written too
+    odds: bool,
 }
 
 /// Writes the houses again when the folder no longer holds what was `last` written (its .toc changed, or a house
 /// file is gone); what it wrote then, or None when nothing needed doing.
-fn restore(addons: &Path, last: &Written, houses: &BTreeMap<String, (House, Option<String>)>) -> std::io::Result<Option<Written>> {
+fn restore(addons: &Path, last: &Written, houses: &BTreeMap<String, (House, Option<String>)>, odds: Option<&str>) -> std::io::Result<Option<Written>> {
     let dir = addons.join(FOLDER);
-    if read_toc(addons) == last.toc && last.keys.iter().all(|k| dir.join(file_of(k)).is_file()) {
+    if read_toc(addons) == last.toc && last.keys.iter().all(|k| dir.join(file_of(k)).is_file()) && (!last.odds || dir.join(ODDS_FILE).is_file()) {
         return Ok(None);
     }
     let list: Vec<&House> = last.keys.iter().filter_map(|k| houses.get(k).map(|h| &h.0)).collect();
-    if list.is_empty() {
+    let odds = odds.filter(|_| last.odds);
+    if list.is_empty() && odds.is_none() {
         return Ok(None);
     }
-    write_addon(addons, &list, unix_now())?;
-    Ok(Some(Written { toc: read_toc(addons), keys: list.iter().map(|h| h.key.clone()).collect() }))
+    write_feed(addons, &list, odds, unix_now())?;
+    Ok(Some(Written { toc: read_toc(addons), keys: list.iter().map(|h| h.key.clone()).collect(), odds: odds.is_some() }))
 }
 
 fn read_toc(addons: &Path) -> String {
@@ -702,6 +761,8 @@ impl Poller {
             hold_until: None,
             quiet: 0,
             quiet_logged: None,
+            odds: None,
+            odds_asked: None,
         }
     }
 
@@ -711,7 +772,7 @@ impl Poller {
     pub fn check(&mut self, forever: &Path) -> bool {
         let Some(last) = &self.last else { return false };
         let addons = forever.join("Interface").join("AddOns");
-        match restore(&addons, last, &self.houses) {
+        match restore(&addons, last, &self.houses, self.odds.as_ref().map(|o| o.lua.as_str())) {
             Ok(Some(w)) => {
                 config::log(&format!("price feed: {FOLDER} was replaced (an addon update?); wrote its {} houses again", w.keys.len()));
                 self.last = Some(w);
@@ -851,19 +912,39 @@ impl Poller {
                 }
             }
         }
+        // the players' disenchant odds: every LIST_EVERY, with the ETag (a failure only waits for the next time)
+        if self.odds.is_none() {
+            self.odds = load_odds();
+        }
+        if error.as_ref().is_none_or(|e| !e.stop) && self.odds_asked.is_none_or(|t| t.elapsed() >= LIST_EVERY) {
+            self.odds_asked = Some(Instant::now());
+            match fetch_odds(&self.http, &self.server, self.odds.as_ref().and_then(|o| o.etag.as_deref())) {
+                Ok(Some(o)) => {
+                    if self.odds.as_ref().map(|x| &x.lua) != Some(&o.lua) {
+                        config::log("price feed: new disenchant odds");
+                        changed = true;
+                    }
+                    save_odds(&o);
+                    self.odds = Some(o);
+                }
+                Ok(None) => {}
+                Err(e) => config::log(&format!("price feed: disenchant odds not fetched ({}); trying again in 15 min", e.msg)),
+            }
+        }
+        let odds = self.odds.as_ref().map(|o| o.lua.as_str());
         let list: Vec<&House> = keys.iter().filter_map(|k| self.houses.get(k).map(|h| &h.0)).collect();
         let names: Vec<String> = list.iter().map(|h| h.key.clone()).collect();
         // nothing moved since the last write: nothing is written, not even compared (check() puts back a folder an
         // addon update replaced)
-        let unchanged = !changed && self.last.as_ref().is_some_and(|w| w.keys == names);
+        let unchanged = !changed && self.last.as_ref().is_some_and(|w| w.keys == names && w.odds == odds.is_some());
         let write = if unchanged {
             Ok(false)
-        } else if list.is_empty() {
+        } else if list.is_empty() && odds.is_none() {
             self.last = None;
             write_stub(&addons)
         } else {
-            let w = write_addon(&addons, &list, now);
-            self.last = w.is_ok().then(|| Written { toc: read_toc(&addons), keys: names.clone() });
+            let w = write_feed(&addons, &list, odds, now);
+            self.last = w.is_ok().then(|| Written { toc: read_toc(&addons), keys: names.clone(), odds: odds.is_some() });
             w
         };
         let mut wrote = false;
@@ -1119,8 +1200,8 @@ mod tests {
         let mut houses = BTreeMap::new();
         houses.insert(h.key.clone(), (h.clone(), None));
         write_addon(&addons, &[&h], 100).unwrap();
-        let mut last = Written { toc: read_toc(&addons), keys: vec![h.key.clone()] };
-        let mut check = || match restore(&addons, &last, &houses).unwrap() {
+        let mut last = Written { toc: read_toc(&addons), keys: vec![h.key.clone()], odds: false };
+        let mut check = || match restore(&addons, &last, &houses, None).unwrap() {
             Some(w) => {
                 last = w;
                 true
@@ -1180,6 +1261,35 @@ mod tests {
         assert_eq!(names_in(&dir), set(&["EverlookDBAuctions_Shared.toc", "Shared.lua"]));
         assert!(addons.join("Other").join("Other.lua").exists() && addons.join(READER).exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn writes_the_disenchant_odds_next_to_the_houses() {
+        let (_root, addons) = game("odds");
+        install_stub(&addons);
+        let dir = addons.join(FOLDER);
+        let h = parse(&body(1_795_000_000), "EU-4-Alliance", 1_795_000_100).unwrap();
+        let odds = crate::delog::odds_lua(&json!({ "v": 1, "updated": 5, "kinds": { "4:2:25": { "n": 9, "mats": { "10940": { "p": 1.0, "c": 2.0 } } } }, "items": {} }), MARK).unwrap();
+        assert!(write_feed(&addons, &[&h], Some(&odds), 100).unwrap());
+        assert_eq!(std::fs::read_to_string(dir.join(ODDS_FILE)).unwrap(), odds);
+        assert!(read_toc(&addons).ends_with("Shared.lua\nEU-4-Alliance.lua\nDEOdds.lua\n"), "{}", read_toc(&addons));
+        assert!(!write_feed(&addons, &[&h], Some(&odds), 200).unwrap(), "unchanged: nothing written");
+        // odds only, no houses
+        assert!(write_feed(&addons, &[], Some(&odds), 300).unwrap());
+        assert!(!dir.join("EU-4-Alliance.lua").exists() && dir.join(ODDS_FILE).is_file());
+        // an addon update brings back the empty copy: the odds are written again
+        let last = Written { toc: read_toc(&addons), keys: vec![], odds: true };
+        install_stub(&addons);
+        std::fs::remove_file(dir.join(ODDS_FILE)).ok();
+        assert!(restore(&addons, &last, &BTreeMap::new(), Some(&odds)).unwrap().is_some());
+        assert!(dir.join(ODDS_FILE).is_file() && read_toc(&addons).ends_with("Shared.lua\nDEOdds.lua\n"));
+        // without odds the app's DEOdds.lua goes; the stub removes it too
+        assert!(write_feed(&addons, &[&h], None, 400).unwrap());
+        assert!(!dir.join(ODDS_FILE).exists() && !read_toc(&addons).contains("DEOdds"));
+        write_feed(&addons, &[&h], Some(&odds), 500).unwrap();
+        assert!(write_stub(&addons).unwrap());
+        assert!(!dir.join(ODDS_FILE).exists());
+        assert!(dir.join("README.md").is_file(), "the CurseForge files stay");
     }
 
     #[test]
@@ -1308,9 +1418,9 @@ mod tests {
         let dir = addons.join(FOLDER);
         let minute = Duration::from_secs(55)..=Duration::from_secs(60);
 
-        // the first check: the list, the versions, the house; written
+        // the first check: the list, the versions, the house, the disenchant odds (none on this server); written
         let (view, wait) = p.refresh(&root, true);
-        assert_eq!(take_log(), ["/api/v1/auctions", "/api/v1/auctions/versions?houses=EU-4-Alliance", "/api/v1/auctions/house/EU-4-Alliance/compact"]);
+        assert_eq!(take_log(), ["/api/v1/auctions", "/api/v1/auctions/versions?houses=EU-4-Alliance", "/api/v1/auctions/house/EU-4-Alliance/compact", "/api/v1/crowd/disenchant"]);
         assert!(minute.contains(&wait), "{wait:?}");
         assert_eq!((view.houses.len(), view.note.clone()), (1, None));
         assert!(dir.join("EU-4-Alliance.lua").is_file());

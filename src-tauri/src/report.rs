@@ -344,6 +344,7 @@ pub fn config_json(cfg: &Config, scrub: &Scrub) -> Value {
     if let Some(o) = v.as_object_mut() {
         o.remove("done");
         o.remove("receipts");
+        o.remove("de_sent");
     }
     drop_secrets(&mut v);
     scrub.value(&v)

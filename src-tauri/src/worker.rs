@@ -488,11 +488,16 @@ pub struct Watcher {
     http: reqwest::blocking::Client,
     tracks: HashMap<PathBuf, Track>,
     blocked_until: Option<Instant>,
+    /// auctions files whose logged disenchants could not all be sent: when to try again (delog.rs)
+    de_retry: HashMap<PathBuf, Instant>,
 }
+
+/// How long to wait before logged disenchants the server did not take are sent again.
+const DE_RETRY: Duration = Duration::from_secs(15 * 60);
 
 impl Watcher {
     pub fn new(shared: Arc<Shared>) -> Watcher {
-        Watcher { shared, http: client(), tracks: HashMap::new(), blocked_until: None }
+        Watcher { shared, http: client(), tracks: HashMap::new(), blocked_until: None, de_retry: HashMap::new() }
     }
 
     /// The worker thread: poll, upload, report. `report` is called after every pass.
@@ -540,7 +545,8 @@ impl Watcher {
                 continue; // the game may still be writing it
             }
             let due = t.retry_at.map_or(true, |r| r <= Instant::now());
-            if !force && t.seen == Some(sig) && !(t.retry_at.is_some() && due) {
+            let de_due = self.de_retry.get(f).is_some_and(|r| *r <= Instant::now());
+            if !force && t.seen == Some(sig) && !(t.retry_at.is_some() && due) && !de_due {
                 continue; // unchanged since the last look, and no retry due: no need to read it
             }
             let k = key(&self.shared.server, f);
@@ -562,6 +568,10 @@ impl Watcher {
             if bytes.is_empty() {
                 continue;
             }
+            if is_auctions(f) {
+                self.disenchants(f, &bytes, label);
+            }
+            let t = self.tracks.entry(f.clone()).or_default();
             let hash = sha256(&bytes);
             let last = self.shared.cfg.lock().unwrap().done.get(&k).cloned();
             let same = last.as_ref().is_some_and(|d| d.hash == hash);
@@ -684,6 +694,47 @@ impl Watcher {
             (true, _) => Status { kind: Kind::Idle, line: "Waiting for the addons' files (log out or /reload in game)".into(), files: 0, views },
             (false, Some(l)) => Status { kind: if partial { Kind::Busy } else { Kind::Ok }, line: l, files: files.len(), views },
             (false, None) => Status { kind: Kind::Idle, line: "Watching for changes".into(), files: files.len(), views },
+        }
+    }
+
+    /// The disenchants EverlookDB Auctions logged in this file (and the old DisenchantValue addon in the same folder)
+    /// that the server doesn't have yet, in batches; what it took is remembered, the rest is tried again later.
+    fn disenchants(&mut self, f: &Path, bytes: &[u8], label: &str) {
+        self.de_retry.remove(f);
+        let legacy = f.parent().map(|d| d.join(crate::delog::LEGACY_FILE)).and_then(|p| std::fs::read(p).ok()).map(|b| crate::delog::parse_legacy(&b)).unwrap_or_default();
+        let all = crate::delog::merge(crate::delog::parse_delog(bytes), legacy);
+        if all.is_empty() {
+            return;
+        }
+        let k = key(&self.shared.server, f);
+        let (mark, secret) = {
+            let mut c = self.shared.cfg.lock().unwrap();
+            if c.crowd_secret.len() < 32 {
+                c.crowd_secret = crate::delog::new_secret();
+                c.save();
+            }
+            (c.de_sent.get(&k).copied().unwrap_or(0), c.crowd_secret.clone())
+        };
+        let todo = crate::delog::pending(&all, mark);
+        let (mut new, mut known, mut refused) = (0, 0, 0);
+        for b in crate::delog::batches(&todo, crate::delog::BATCH) {
+            match crate::delog::send(&self.http, &self.shared.server, &crate::delog::body(&secret, b)) {
+                crate::delog::Sent::Ok(a, k2, r) => {
+                    (new, known, refused) = (new + a, known + k2, refused + r);
+                    let last = b.last().map_or(mark, |e| e.t);
+                    let mut c = self.shared.cfg.lock().unwrap();
+                    c.de_sent.insert(k.clone(), last);
+                    c.save();
+                }
+                crate::delog::Sent::Later(why) => {
+                    config::log(&format!("{label}: disenchants not sent ({why}); trying again in 15 min"));
+                    self.de_retry.insert(f.to_path_buf(), Instant::now() + DE_RETRY);
+                    break;
+                }
+            }
+        }
+        if new + known + refused > 0 {
+            config::log(&format!("{label}: disenchants sent: {new} new, {known} already there, {refused} not taken"));
         }
     }
 

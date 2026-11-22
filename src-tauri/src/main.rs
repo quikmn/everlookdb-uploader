@@ -7,6 +7,7 @@ mod addons;
 mod blp;
 mod catalog;
 mod config;
+mod delog;
 mod giveaway;
 mod github;
 mod icons;
