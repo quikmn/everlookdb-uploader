@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New: Freeze an addon to keep the version you have. EverlookDB never updates it until you unfreeze it, and still tells you when a newer one is out.
+
 ## v0.7.6 (2026-11-22)
 
 - New: disenchant odds measured by players. The disenchants EverlookDB Auctions logs are shared, and the Price Feed brings everyone’s results back into the game.

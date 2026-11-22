@@ -162,6 +162,10 @@ pub struct Item {
     /// the folder whose .toc speaks for the addon ("Open folder" opens it)
     pub main: String,
     pub update: bool,
+    /// the player froze it ("never update this one"): no Update button, never updated by anything
+    pub frozen: bool,
+    /// frozen, and the catalog has a newer version (said quietly; not counted as an update)
+    pub held: bool,
     /// folders in AddOns (not ours) that are in the way of the newest version: "Replace (backup kept)"
     pub conflict: Vec<String>,
     /// the automatic update (and Update all) may take it: EverlookDB installed it, or its version and the catalog's
@@ -317,6 +321,11 @@ pub fn strictly_newer(installed: Option<&str>, latest: &str) -> bool {
 
 /// The addons in an install, grouped, matched to records and the catalog.
 pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
+    list_with(install, catalog, &config::frozen_in(&install.id))
+}
+
+/// `list`, with the install's frozen folders (lower case) given.
+fn list_with(install: &Install, catalog: Option<&Catalog>, frozen: &HashSet<String>) -> Vec<Item> {
     // the shared-prices data addon is the app's own output (shared.rs), not an addon to manage
     let folders: Vec<Folder> = addons::scan(&install.addons_dir, &install.folder).into_iter().filter(|f| f.name != crate::shared::FOLDER).collect();
     let records = Records::load().of(&install.id);
@@ -356,13 +365,18 @@ pub fn list(install: &Install, catalog: Option<&Catalog>) -> Vec<Item> {
                     links.push((label, v));
                 }
             }
+            let newer = latest.as_deref().is_some_and(|l| differs(version.as_deref(), l));
+            let is_frozen = g.folders.iter().any(|f| frozen.contains(&f.to_ascii_lowercase()));
             Item {
                 key: g.key.clone().unwrap_or_else(|| format!("folder:{}", g.main)),
-                update: latest.as_deref().is_some_and(|l| differs(version.as_deref(), l)),
+                update: newer && !is_frozen,
+                frozen: is_frozen,
+                held: newer && is_frozen,
                 conflict: g
                     .key
                     .as_deref()
                     .zip(latest.as_deref())
+                    .filter(|_| !is_frozen)
                     .and_then(|(k, l)| conflicts.get(&install.id, k, l))
                     .map(|c| c.folders.clone())
                     .unwrap_or_default(),
@@ -832,13 +846,18 @@ fn zip_dir(install: &Install, id: &str) -> PathBuf {
 pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress: OnProgress) -> Result<Change, Failure> {
     let _busy = Busy::start();
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // a frozen addon's files are never touched, whoever asks (a click, Update all, the automatic update, Install all)
+    let mut records = Records::load();
+    let old = records.of(&install.id).get(&addon.id).cloned();
+    let mine = old.iter().flat_map(|r| r.folders.iter()).chain(&addon.folders).chain(take_over);
+    if frozen_folder(&install.addons_dir, &config::frozen_in(&install.id), mine).is_some() {
+        return Err(frozen_text(&addon.name).into());
+    }
     let file = addon.file_for(&install.accepts).ok_or_else(|| format!("{} has no download for {}.", addon.name, install.name))?;
     // from a repo the player added: only a zip attached to one of its GitHub releases
     if addon.custom && !crate::github::safe_download(&file.url) {
         return Err(format!("{}'s download isn't a GitHub release file, so EverlookDB didn't install it.", addon.name).into());
     }
-    let mut records = Records::load();
-    let old = records.of(&install.id).get(&addon.id).cloned();
     let dir = zip_dir(install, &addon.id);
     let name = if file.name.is_empty() { format!("{}.zip", short_hash(&file.url)) } else { file.name.replace(['/', '\\', ':'], "_") };
     let zip = dir.join(&name);
@@ -885,6 +904,17 @@ pub fn install(install: &Install, addon: &Addon, take_over: &[String], progress:
     Ok(Change { install: install.name.clone(), name: addon.name.clone(), from: old.map(|r| r.version), to: addon.version.clone(), running: crate::wow::game_running(install) })
 }
 
+/// The first of `folders` that is frozen (`frozen`, lower case) and in AddOns now. A freeze left on a folder
+/// that isn't there any more holds nothing back.
+fn frozen_folder<'a>(addons_dir: &Path, frozen: &HashSet<String>, folders: impl IntoIterator<Item = &'a String>) -> Option<String> {
+    folders.into_iter().find(|f| frozen.contains(&f.to_ascii_lowercase()) && addons_dir.join(f).is_dir()).cloned()
+}
+
+/// Why a frozen addon wasn't changed.
+pub fn frozen_text(name: &str) -> String {
+    format!("{name} is frozen, so EverlookDB leaves it exactly as it is. Unfreeze it first to update it.")
+}
+
 /// How many backups of one addon are kept (the newest).
 const KEEP_BACKUPS: usize = 3;
 
@@ -927,6 +957,9 @@ pub fn rollback(install: &Install, id: &str) -> Result<Change, Failure> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = Records::load();
     let rec = records.of(&install.id).get(id).cloned().ok_or("EverlookDB didn't install this addon, so there's no earlier version to go back to.")?;
+    if frozen_folder(&install.addons_dir, &config::frozen_in(&install.id), &rec.folders).is_some() {
+        return Err(frozen_text(&rec.name).into());
+    }
     let prev = rec.previous.clone().filter(|p| p.zip.is_file()).ok_or("No earlier version of it is kept any more.")?;
     let allowed: HashSet<String> = rec.folders.iter().cloned().collect();
     let folders = install_zip(&install.addons_dir, &prev.zip, &allowed, None)?;
@@ -1124,6 +1157,12 @@ pub const NO_GAME: &str = "This game isn't installed here (only leftover files),
 /// The addons we installed in `install` that have a newer version in the catalog. None when the game isn't there:
 /// nothing is downloaded into a folder no game uses.
 pub fn pending<'a>(install: &Install, catalog: &'a Catalog) -> Vec<(&'a Addon, Vec<String>)> {
+    pending_with(install, catalog, &config::frozen_in(&install.id))
+}
+
+/// `pending`, with the install's frozen folders given: a frozen addon is never in it (`list_with` gives it no
+/// `update`, so no `auto`).
+fn pending_with<'a>(install: &Install, catalog: &'a Catalog, frozen: &HashSet<String>) -> Vec<(&'a Addon, Vec<String>)> {
     if !install.game {
         return Vec::new();
     }
@@ -1131,9 +1170,9 @@ pub fn pending<'a>(install: &Install, catalog: &'a Catalog) -> Vec<(&'a Addon, V
     // (players expect "update by itself" to mean all of them). Those are taken over only when the catalog's version
     // is certainly higher (both plain numbers), so a build like "1.2-forever" is never swapped for "1.2"; their
     // folders are passed as consent, and install() backs up the old copy first.
-    list(install, Some(catalog))
+    list_with(install, Some(catalog), frozen)
         .into_iter()
-        .filter(|it| it.auto)
+        .filter(|it| it.auto && !it.frozen)
         .filter_map(|it| catalog.get(&it.key).map(|a| (a, if it.managed { Vec::new() } else { it.folders.clone() })))
         .collect()
 }
@@ -1288,6 +1327,65 @@ mod tests {
         assert!(!get("Ahead").update && !get("Ahead").auto);
         let ids: Vec<&str> = pending(&install, &cat).iter().map(|(a, _)| a.id.as_str()).collect();
         assert_eq!(ids, vec!["github:x/Plain"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_frozen_addon_is_never_updated() {
+        let (d, mut install) = test_install(
+            "frozen",
+            &[
+                ("Questie", "## Title: Questie
+## Version: 1.14.45
+"),
+                ("Questie-Options", "## Title: Questie Options
+## Dependencies: Questie
+"),
+                ("Plain", "## Title: Plain
+## Version: 1.2
+"),
+            ],
+        );
+        install.game = true;
+        let entry = |id: &str, folders: &[&str], version: &str| Addon {
+            id: id.into(),
+            name: folders[0].into(),
+            version: version.into(),
+            folders: folders.iter().map(|f| f.to_string()).collect(),
+            files: vec![CFile { flavors: vec!["forever".into()], url: "https://example.test/x.zip".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let cat = Catalog {
+            version: 1,
+            addons: vec![entry("github:x/Questie", &["Questie", "Questie-Options"], "1.14.46"), entry("github:x/Plain", &["Plain"], "1.3")],
+            ..Default::default()
+        };
+        // not frozen: both are updates, both go by themselves
+        let none = HashSet::new();
+        assert_eq!(pending_with(&install, &cat, &none).len(), 2);
+        // frozen by its main folder (any letter case): no update, not counted, not automatic, but the newer version
+        // is still known (shown quietly)
+        let frozen: HashSet<String> = ["questie".to_string()].into();
+        let items = list_with(&install, Some(&cat), &frozen);
+        let q = items.iter().find(|i| i.name == "Questie").unwrap();
+        assert!(q.frozen && q.held && !q.update && !q.auto);
+        assert_eq!(q.latest.as_deref(), Some("1.14.46"));
+        assert_eq!(items.iter().filter(|i| i.update).count(), 1, "only Plain counts as an update");
+        let p = items.iter().find(|i| i.name == "Plain").unwrap();
+        assert!(!p.frozen && !p.held && p.update && p.auto);
+        let ids: Vec<&str> = pending_with(&install, &cat, &frozen).iter().map(|(a, _)| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["github:x/Plain"], "Update all and the automatic update skip it");
+        // a freeze on any of its folders holds the whole addon (a version that moved its main folder)
+        let other: HashSet<String> = ["questie-options".to_string()].into();
+        assert!(list_with(&install, Some(&cat), &other).iter().find(|i| i.name == "Questie").unwrap().frozen);
+        // install() and rollback() refuse while one of its folders is frozen and there
+        let folders = &cat.addons[0].folders;
+        assert_eq!(frozen_folder(&install.addons_dir, &frozen, folders).as_deref(), Some("Questie"));
+        assert_eq!(frozen_folder(&install.addons_dir, &none, folders), None);
+        // a freeze left on a folder that is gone (uninstalled by hand) holds nothing back: a new install goes in
+        std::fs::remove_dir_all(install.addons_dir.join("Questie")).unwrap();
+        assert_eq!(frozen_folder(&install.addons_dir, &frozen, folders), None);
+        assert!(frozen_text("Questie").contains("Unfreeze it first"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -622,6 +622,10 @@ function oursMark(on) {
 }
 
 const CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
+// a snowflake: frozen ("never update this one")
+const FREEZE_PATH = '<path d="M8 1.5v13M2.4 4.75l11.2 6.5M2.4 11.25l11.2-6.5M6.2 2.6L8 4.2l1.8-1.6M6.2 13.4L8 11.8l1.8 1.6"/>';
+const FROZEN_TIP = 'Frozen: EverlookDB never updates it (not Update all, not by itself). Unfreeze it to update again.';
+const frozenBadge = () => `<span class="state frozen" title="${esc(FROZEN_TIP)}"><svg viewBox="0 0 16 16" aria-hidden="true">${FREEZE_PATH}</svg>Frozen</span>`;
 
 // the addon "Update all" is downloading right now, if it is
 const updatingNow = () => (S.busy.has('*') && S.progress.get('*')?.id) || null;
@@ -693,7 +697,11 @@ function mineRow(it, i) {
   const key = it.key;
   const open = S.open.has(key);
   let action;
-  if (!i.game && it.update && it.catalog) {
+  if (it.frozen) {
+    const ver = it.version_label || it.version;
+    const held = it.held && ver ? `<div class="released">Frozen at ${esc(ver)} · ${esc(it.latest_label || it.latest)} available</div>` : '';
+    action = frozenBadge() + held;
+  } else if (!i.game && it.update && it.catalog) {
     action = noGame();
   } else if (it.update && it.catalog && it.conflict?.length) {
     action = `${replaceButton(key, it.conflict)}<div class="released" title="${esc(it.conflict.join(', '))} ${it.conflict.length === 1 ? 'is' : 'are'} in AddOns from another app or put there by hand">${esc(it.conflict.join(', '))} in the way</div>`;
@@ -728,11 +736,18 @@ function mineMore(it, i) {
   const page = it.ours && ourPage(it.key);
   if (page) actions.push(`<button class="link-button" type="button" data-act="url" data-url="${page}">About it on everlookdb.com</button>`);
   if (it.url && it.url.startsWith('https://')) actions.push(`<button class="link-button" type="button" data-act="url" data-url="${esc(it.url)}">${page ? 'Source' : 'Project page'}</button>`);
-  if (it.managed && it.previous && i.game) {
+  if (it.managed && it.previous && i.game && !it.frozen) {
     actions.push(`<button class="btn" type="button" data-act="rollback" data-id="${esc(key)}" ${busyAttrs(key)}>Go back to ${esc(it.previous)}</button>`);
   }
-  if (it.catalog && !it.managed && it.latest && !it.update && i.game) {
+  if (it.catalog && !it.managed && it.latest && !it.update && !it.frozen && i.game) {
     actions.push(`<button class="btn" type="button" data-act="install" data-id="${esc(key)}" data-take="1" ${busyAttrs(key)} title="Reinstalls it from its source; the copy there now is kept in EverlookDB's backups folder">Keep it updated with EverlookDB</button>`);
+  }
+  if (it.catalog) {
+    actions.push(
+      it.frozen
+        ? `<button class="btn" type="button" data-act="freeze" data-id="${esc(key)}" data-on="" ${busyAttrs(key)}>Unfreeze</button>`
+        : `<button class="btn" type="button" data-act="freeze" data-id="${esc(key)}" data-on="1" ${busyAttrs(key)} title="Keeps this version: EverlookDB never updates it until you unfreeze it">Freeze (never update)</button>`,
+    );
   }
   const asking = S.confirm === key && S.plan?.key === key;
   if (!asking) actions.push(`<button class="btn danger" type="button" data-act="ask-remove" data-id="${esc(key)}">Uninstall</button>`);
@@ -745,7 +760,7 @@ function mineMore(it, i) {
       : 'Installed by you or another app, from a source EverlookDB doesn’t have. EverlookDB only changes it if you uninstall it here.';
   return `<div class="row-more">
     ${it.notes ? `<p>${esc(it.notes)}</p>` : ''}
-    <p>${who}</p>
+    <p>${who}${it.frozen ? ' Frozen: EverlookDB never updates it until you unfreeze it.' : ''}</p>
     <p class="folders">${plural(it.folders.length, 'folder', 'folders')}: ${it.folders.map(esc).join(', ')}</p>
     ${actions.length ? `<div class="actions">${actions.join('')}</div>` : ''}
     ${asking ? confirmHtml(it, S.plan) : ''}
@@ -836,6 +851,8 @@ function browseRow(a, i, it, runs) {
     action = it ? `<span class="state ok">${CHECK}Installed</span>` : noGame();
   } else if (!runs) {
     action = `<span class="state">Not for ${esc(i.name)}</span>`;
+  } else if (it && it.frozen) {
+    action = frozenBadge();
   } else if (it && it.update) {
     action = it.conflict?.length
       ? replaceButton(a.id, it.conflict)
@@ -1037,6 +1054,10 @@ async function onAction(el) {
           r.failed,
         );
       });
+    case 'freeze': {
+      const on = !!el.dataset.on;
+      return run(el.dataset.id, on ? 'Freezing…' : 'Unfreezing…', () => invoke('set_frozen', { install: S.sel, id: el.dataset.id, frozen: on }));
+    }
     case 'rollback':
       return run(el.dataset.id, 'Going back…', async () => {
         const c = await invoke('rollback_addon', { install: S.sel, id: el.dataset.id });
@@ -1243,6 +1264,7 @@ const ICON = {
   folder: '<path d="M2.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h4.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z"/>',
   link: '<path d="M9 3.5h3.5V7M12.5 3.5L7 9"/><path d="M11 9.5v2.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2.5"/>',
   copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5"/>',
+  freeze: FREEZE_PATH,
   trash: '<path d="M3 4.5h10M6.5 4.5V3a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 .5.5v1.5M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8"/>',
 };
 
@@ -1269,6 +1291,13 @@ function ctxItems(key) {
     out.push({ label: 'Open folder', icon: 'folder', act: 'open-folder', data: { folder: it.main || '' } });
     links(it.ours && ourPage(key), it.url);
     out.push({ label: 'Copy name', icon: 'copy', act: 'copy-name', data: { name: it.name } });
+    if (it.catalog) {
+      out.push(
+        it.frozen
+          ? { label: 'Unfreeze', icon: 'freeze', act: 'freeze', data: { id: key, on: '' }, off: busy }
+          : { label: 'Freeze (never update)', icon: 'freeze', act: 'freeze', data: { id: key, on: '1' }, off: busy },
+      );
+    }
     out.push('-');
     out.push({ label: 'Uninstall…', icon: 'trash', act: 'ask-remove', data: { id: key }, danger: true, off: busy });
     return out;
@@ -1277,7 +1306,9 @@ function ctxItems(key) {
   if (!a) return [];
   const it = S.items.find((x) => x.catalog && x.key === a.id);
   if (i.game && fileFor(a, i.accepts)) {
-    if (it && it.update) {
+    if (it && it.frozen) {
+      out.push({ label: 'Frozen', icon: 'freeze', off: true });
+    } else if (it && it.update) {
       out.push({ label: `Update to ${a.version_label || a.version}`, icon: 'update', act: 'install', data: { id: a.id, take: it.managed ? '' : '1' }, off: busy });
     } else if (it) {
       out.push({ label: 'Installed', icon: 'installed', off: true });

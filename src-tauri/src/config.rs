@@ -153,6 +153,10 @@ pub struct Config {
     /// "<server>|<file path>" -> the time of the newest logged disenchant the server took from that file
     #[serde(default)]
     pub de_sent: BTreeMap<String, i64>,
+    /// "Freeze": addons the player said never to update, per install (its flavor folder) -> their main folder
+    /// names (folder names stay the same from version to version). See manager::list and manager::install.
+    #[serde(default)]
+    pub frozen: BTreeMap<String, Vec<String>>,
 }
 
 /// A window's place and inner size, in logical pixels.
@@ -255,7 +259,7 @@ fn yes() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, auto_update_chosen: false, app_auto_update: true, app_auto_update_chosen: false, recent_updates: Vec::new(), selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true, ours_card_dismissed: false, crowd_secret: String::new(), de_sent: BTreeMap::new() }
+        Config { wow_dir: None, paused: false, done: BTreeMap::new(), last_status: None, uploads: BTreeMap::new(), extra_roots: Vec::new(), auto_update: true, auto_update_chosen: false, app_auto_update: true, app_auto_update_chosen: false, recent_updates: Vec::new(), selected: None, receipts: Receipts::default(), autostart_decided: false, github_repos: Vec::new(), window: None, shared_prices: true, ours_card_dismissed: false, crowd_secret: String::new(), de_sent: BTreeMap::new(), frozen: BTreeMap::new() }
     }
 }
 
@@ -298,6 +302,30 @@ impl Config {
         self.app_auto_update_chosen = true;
     }
 
+    /// Freeze the addon whose main folder is `folder` in `install`: EverlookDB never updates it.
+    pub fn freeze(&mut self, install: &str, folder: &str) {
+        let list = self.frozen.entry(install.to_string()).or_default();
+        if !list.iter().any(|f| f.eq_ignore_ascii_case(folder)) {
+            list.push(folder.to_string());
+            list.sort_by_key(|f| f.to_ascii_lowercase());
+        }
+    }
+
+    /// Unfreeze every one of `folders` in `install` (an addon's folders; its freeze is on one of them).
+    pub fn unfreeze(&mut self, install: &str, folders: &[String]) {
+        if let Some(list) = self.frozen.get_mut(install) {
+            list.retain(|f| !folders.iter().any(|x| x.eq_ignore_ascii_case(f)));
+            if list.is_empty() {
+                self.frozen.remove(install);
+            }
+        }
+    }
+
+    /// The frozen folders of `install`, lower case.
+    pub fn frozen_in(&self, install: &str) -> std::collections::HashSet<String> {
+        self.frozen.get(install).map(|l| l.iter().map(|f| f.to_ascii_lowercase()).collect()).unwrap_or_default()
+    }
+
     /// Note an update done by itself (newest first, the list kept short).
     pub fn note_recent(&mut self, u: RecentUpdate) {
         self.recent_updates.insert(0, u);
@@ -314,6 +342,18 @@ impl Config {
             }
         }
     }
+}
+
+/// The frozen folders of `install` (lower case) as config.json has them now. Every change to them is saved at
+/// once (main.rs set_frozen), so the file is what the window last set. Only that part of the file is read.
+pub fn frozen_in(install: &str) -> std::collections::HashSet<String> {
+    #[derive(Deserialize, Default)]
+    struct Part {
+        #[serde(default)]
+        frozen: BTreeMap<String, Vec<String>>,
+    }
+    let p: Part = std::fs::read(Config::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    Config { frozen: p.frozen, ..Default::default() }.frozen_in(install)
 }
 
 /// A line in uploader.log (kept under 512 KB).
@@ -449,5 +489,26 @@ mod tests {
         };
         let back: Config = serde_json::from_slice(&serde_json::to_vec_pretty(&c).unwrap()).unwrap();
         assert_eq!(back.receipts, c.receipts);
+    }
+
+    #[test]
+    fn frozen_addons_persist_and_old_files_have_none() {
+        // a config.json from before Freeze: nothing frozen
+        let old: Config = serde_json::from_str(r#"{"auto_update": true}"#).unwrap();
+        assert!(old.frozen.is_empty());
+        let mut c = Config::default();
+        c.freeze("_forever_", "Questie");
+        c.freeze("_forever_", "questie");
+        c.freeze("_classic_", "Bagnon");
+        assert_eq!(c.frozen["_forever_"], vec!["Questie".to_string()], "once, whatever the letter case");
+        let mut back: Config = serde_json::from_slice(&serde_json::to_vec_pretty(&c).unwrap()).unwrap();
+        assert!(!back.migrate());
+        assert_eq!(back.frozen, c.frozen);
+        assert!(back.frozen_in("_forever_").contains("questie"));
+        assert!(back.frozen_in("_anniversary_").is_empty());
+        // unfreezing (or uninstalling) takes it off by any of its folders
+        back.unfreeze("_forever_", &["Questie-Options".into(), "QUESTIE".into()]);
+        assert!(!back.frozen.contains_key("_forever_"));
+        assert!(back.frozen_in("_classic_").contains("bagnon"));
     }
 }

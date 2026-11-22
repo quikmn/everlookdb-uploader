@@ -402,6 +402,7 @@ fn run(args: Args) {
             uninstall_plan,
             remove_addon,
             rollback_addon,
+            set_frozen,
             update_all,
             add_folder,
             forget_folder,
@@ -1160,6 +1161,14 @@ fn remove_addon(ui: State<Ui>, install: String, id: String, folders: Vec<String>
     let done = manager::uninstall(&i, cat.as_deref(), &id, &folders, &mut manager::recycle)
         .inspect_err(|e| report::note_error("uninstall", &format!("{id} in {}: {e}", i.name)))?;
     let name = done.name;
+    // uninstalling ends a freeze: a new install of it updates again
+    {
+        let mut c = ui.shared.cfg.lock().unwrap();
+        if !c.frozen_in(&i.id).is_disjoint(&done.folders.iter().map(|f| f.to_ascii_lowercase()).collect()) {
+            c.unfreeze(&i.id, &done.folders);
+            c.save();
+        }
+    }
     if !done.managed {
         return Ok(name);
     }
@@ -1273,6 +1282,24 @@ async fn install_from_github(app: AppHandle, install: String, id: String, take_o
         Ok(change)
     })
     .await
+}
+
+/// "Freeze" (never update this addon) or "Unfreeze" a listed addon. Kept in config.json by its main folder, which
+/// stays the same from version to version.
+#[tauri::command(async)]
+fn set_frozen(ui: State<Ui>, install: String, id: String, frozen: bool) -> Result<(), String> {
+    let i = find_install(&ui, &install)?;
+    let items = manager::list(&i, ui.catalog().as_deref());
+    let it = items.iter().find(|x| x.key == id).ok_or("That addon isn't in the AddOns folder any more.")?;
+    let mut c = ui.shared.cfg.lock().unwrap();
+    if frozen {
+        c.freeze(&i.id, &it.main);
+    } else {
+        c.unfreeze(&i.id, &it.folders);
+    }
+    c.save();
+    config::log(&format!("{} {} ({}) in {}", if frozen { "froze" } else { "unfroze" }, it.name, it.main, i.id));
+    Ok(())
 }
 
 #[tauri::command(async)]
