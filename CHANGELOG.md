@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.8 (2026-11-22)
 
 - Update all with nothing to update no longer shows a second "up to date" box: the bar says it, with when it checked. Update all is only gold when there is something to update.
 - Slim scrollbars in the app's colours.
