@@ -10,6 +10,7 @@ mod config;
 mod delog;
 mod giveaway;
 mod github;
+mod health;
 mod icons;
 mod manager;
 mod ours;
@@ -187,7 +188,8 @@ fn command_line(args: &Args) -> i32 {
         println!("No WTF/Account/*/SavedVariables/EverlookDB.lua or EverlookDBAuctions.lua yet.");
     }
     if args.shared {
-        let (view, _) = shared::Poller::new(&args.server).refresh(&dir, cfg.shared_prices);
+        let mut poller = shared::Poller::new(&args.server);
+        let (view, _) = poller.refresh(&dir, cfg.shared_prices);
         println!("Price Feed: {}", if view.on { "on" } else { "off" });
         let now = chrono::Utc::now().timestamp();
         for h in &view.houses {
@@ -196,7 +198,10 @@ fn command_line(args: &Args) -> i32 {
         if let Some(n) = &view.note {
             println!("  {n}");
         }
-        return if view.note.as_deref().is_some_and(|n| n.starts_with("Last check failed")) { 2 } else { 0 };
+        if poller.failing() {
+            println!("  The check failed (see uploader.log); the app tries again by itself");
+        }
+        return if poller.failing() { 2 } else { 0 };
     }
     if !args.once {
         return 0;
@@ -207,7 +212,7 @@ fn command_line(args: &Args) -> i32 {
     let status = Watcher::new(shared).pass(false, true);
     println!("Result:      {}", status.line);
     for v in &status.views {
-        println!("  {}: {}{}", v.label, v.headline, v.next.as_deref().map(|n| format!(" ({n})")).unwrap_or_default());
+        println!("  {}: {} ({})", v.label, v.headline, v.short);
         for d in &v.details {
             println!("    {d}");
         }
@@ -222,7 +227,7 @@ fn send_report_once(args: &Args) -> i32 {
     let cat = catalog::cached_labelled();
     let what = if args.what.is_empty() && args.test { "TEST report from the command line; delete it" } else { args.what.as_str() };
     let inp = report::Inputs { cfg: &cfg, installs: &installs, catalog: cat.as_ref(), price_feed: None, what, shown: "", test: args.test };
-    let out = make_report(&args.server, &inp);
+    let out = make_report(&args.server, &inp, false);
     match (&out.id, &out.error) {
         (Some(id), _) => {
             println!("Sent: report {id}");
@@ -250,20 +255,29 @@ struct ReportOutcome {
     file: Option<String>,
     /// the exact text of what was (or would have been) sent: reports/last-report.txt
     text: Option<String>,
+    /// the server couldn't be reached: it waits in reports/outbox/ and goes by itself when it's back
+    queued: bool,
 }
 
-/// Build, scrub and send a report; keep a zip when it can't be sent.
-fn make_report(server: &str, inp: &report::Inputs) -> ReportOutcome {
+/// Build, scrub and send a report. When the server can't be reached and `queue`: it waits in the outbox and goes by
+/// itself when the server is back (spawn_health); otherwise a zip is kept.
+fn make_report(server: &str, inp: &report::Inputs, queue: bool) -> ReportOutcome {
     let log = report::log_tail(&config::dir(), report::MAX_LOG_LINES, report::MAX_LOG_BYTES);
     let r = report::build(inp, &log);
     let text = report::write_text("last-report.txt", &report::readable(&r)).ok().map(|p| p.display().to_string());
-    let sent = report::encode(&r).map_err(|e| format!("couldn't pack the report ({e})")).and_then(|gz| report::send(server, gz));
+    let gz = report::encode(&r).map_err(|e| report::NotSent::now(format!("couldn't pack the report ({e})")));
+    let sent = gz.clone().and_then(|gz| report::send(server, gz));
     match sent {
         Ok(id) => {
             config::log(&format!("problem report sent: {id}"));
             ReportOutcome { id: Some(id), text, ..Default::default() }
         }
+        Err(e) if e.later && queue && gz.as_ref().is_ok_and(|gz| report::queue(&report::outbox_dir(), gz, inp.shown).is_ok()) => {
+            config::log(&format!("problem report waits for the server ({}); it goes by itself when it's back", e.msg));
+            ReportOutcome { error: Some(e.msg), queued: true, text, ..Default::default() }
+        }
         Err(e) => {
+            let e = e.msg;
             config::log(&format!("problem report not sent: {e}"));
             let file = report::keep_copy(&r).map(|p| p.display().to_string()).map_err(|k| config::log(&format!("problem report not kept: {k}"))).ok();
             ReportOutcome { error: Some(e), file, text, ..Default::default() }
@@ -593,6 +607,7 @@ fn setup(app: &AppHandle, shared: Arc<Shared>, show: bool) -> tauri::Result<()> 
     }
     spawn_addon_checks(app.clone());
     spawn_updater(app.clone());
+    spawn_health(app.clone());
     Ok(())
 }
 
@@ -802,6 +817,58 @@ struct AppState {
     uploads: UploadState,
     catalog_origin: Option<Origin>,
     checked: Option<String>,
+    /// the background jobs' messages (health.rs) and reports waiting for the server
+    health: HealthView,
+}
+
+/// What the window's one inbox gets from the background (the "health" event, and get_state).
+#[derive(Serialize, Clone, Default, PartialEq)]
+struct HealthView {
+    lines: Vec<health::Line>,
+    /// problem reports waiting for the server (they go by themselves)
+    reports_waiting: usize,
+}
+
+static HEALTH_VIEW: Mutex<Option<HealthView>> = Mutex::new(None);
+
+fn health_view() -> HealthView {
+    HealthView { lines: health::lines(), reports_waiting: report::waiting_count(&report::outbox_dir()) }
+}
+
+/// A report that had waited went out: the window shows its id next to what it was about.
+#[derive(Serialize, Clone)]
+struct ReportSent {
+    shown: String,
+    id: String,
+}
+
+/// Every few seconds: what the inbox should show (health.rs: a failure becomes a line only after health::QUIET_FOR,
+/// without any new event, so this looks by itself), and the reports waiting for the server, sent once it is back (at
+/// once when another job reaches it, otherwise every two minutes).
+fn spawn_health(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut back = health::back();
+        let mut tried: Option<Instant> = None;
+        loop {
+            let dir = report::outbox_dir();
+            if report::waiting_count(&dir) > 0 && (health::back() != back || tried.is_none_or(|t| t.elapsed() >= Duration::from_secs(120))) {
+                back = health::back();
+                tried = Some(Instant::now());
+                let server = app.state::<Ui>().shared.server.clone();
+                for (shown, id) in report::flush_outbox(&dir, |gz| report::send(&server, gz)) {
+                    let _ = app.emit("report-sent", ReportSent { shown, id });
+                }
+            }
+            let v = health_view();
+            let mut last = HEALTH_VIEW.lock().unwrap();
+            if last.as_ref() != Some(&v) {
+                *last = Some(v.clone());
+                drop(last);
+                let _ = app.emit("health", v);
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
 }
 
 /// The installs in the folders found (scanning for them only when that hasn't happened yet).
@@ -864,6 +931,7 @@ fn get_state(app: AppHandle, ui: State<Ui>) -> AppState {
         uploads: ui.uploads.lock().unwrap().clone(),
         catalog_origin: cat.origin,
         checked: cat.checked.clone(),
+        health: HEALTH_VIEW.lock().unwrap().clone().unwrap_or_else(health_view),
     }
 }
 
@@ -1092,12 +1160,20 @@ fn refresh_catalog(ui: &Ui, max_age: Option<Duration>) {
     });
     // one line per fetch, so the log shows the catalog came in (the check after a start)
     config::log(&format!("catalog: {} addons ({:?})", cat.as_ref().map_or(0, |c| c.addons.len()), origin).to_lowercase());
+    // the server not answering: the list from last time stays, quietly (health.rs)
+    match origin {
+        Origin::Cache | Origin::None => health::fail(health::Job::Catalog, "", health::Trouble::Unreachable("the addon list didn't load".into())),
+        _ => health::ok(health::Job::Catalog, ""),
+    }
     let mut c = ui.catalog.lock().unwrap();
     if let Some(cat) = cat {
         c.catalog = Some(Arc::new(cat));
     }
     c.origin = Some(origin);
-    c.checked = Some(now_rfc3339());
+    // when the list last came from the server (a failed check keeps the time of the last good one)
+    if origin == Origin::Live {
+        c.checked = Some(now_rfc3339());
+    }
     c.loading = false;
     c.fetched_at = Some(Instant::now());
 }
@@ -1321,7 +1397,9 @@ struct Updated {
 }
 
 /// Update everything we installed in `targets`, telling the window how far each download is and which of how many.
-fn update_installs(app: &AppHandle, targets: &[wow::Install], cat: &catalog::Catalog) -> Updated {
+/// `background`: the automatic check (its failures go to health.rs, which notes them for reports when it shows them);
+/// otherwise the player asked, and each failure is noted at once.
+fn update_installs(app: &AppHandle, targets: &[wow::Install], cat: &catalog::Catalog, background: bool) -> Updated {
     // one job from start to end, so the app's self-update doesn't slip in between two addons
     let _busy = manager::Busy::start();
     let count: usize = targets.iter().map(|i| manager::pending(i, cat).len()).sum();
@@ -1338,7 +1416,9 @@ fn update_installs(app: &AppHandle, targets: &[wow::Install], cat: &catalog::Cat
         });
         out.changes.extend(c);
         for x in &f {
-            report::note_error("update", &format!("{} in {}: {}", x.name, i.name, x.message));
+            if !background {
+                report::note_error("update", &format!("{} in {}: {}", x.name, i.name, x.message));
+            }
         }
         out.failed.extend(f);
     }
@@ -1355,7 +1435,7 @@ async fn update_all(app: AppHandle, install: Option<String>) -> Result<Updated, 
             Some(id) => vec![find_install(&ui, &id)?],
             None => installs(&ui),
         };
-        Ok(update_installs(app, &targets, &cat))
+        Ok(update_installs(app, &targets, &cat, false))
     })
     .await
 }
@@ -1453,7 +1533,7 @@ async fn send_report(app: AppHandle, what: String, shown: String) -> Result<Repo
         if !shown.trim().is_empty() {
             report::note_error("window", &shown);
         }
-        Ok(with_inputs(&ui, &what, &shown, |inp| make_report(&ui.shared.server, inp)))
+        Ok(with_inputs(&ui, &what, &shown, |inp| make_report(&ui.shared.server, inp, true)))
     })
     .await
 }
@@ -1672,7 +1752,7 @@ fn auto_update(app: &AppHandle, targets: &[wow::Install], cat: &Catalog) -> (Upd
             config::log(&format!("auto-update: {} is running; its updates wait until it is closed", i.name));
         }
     }
-    (update_installs(app, &free, cat), waiting)
+    (update_installs(app, &free, cat, true), waiting)
 }
 
 /// Remember what the automatic check did (the window's footer), and tell the window what changed.
@@ -1688,6 +1768,13 @@ fn note_auto(app: &AppHandle, off: bool, out: &Updated, waiting: &[String], cat:
     for f in &out.failed {
         config::log(&format!("auto-update failed: {}: {}", f.id, f.message));
     }
+    // the one policy (health.rs): a download that didn't work is tried again at the next check and only shown when it
+    // keeps failing; a problem on this PC is shown at once; a folder in the way is the row's own Replace button
+    let troubles: Vec<(String, health::Trouble)> = out.failed.iter().filter_map(|f| manager::failure_trouble(f).map(|t| (f.id.clone(), t))).collect();
+    health::keep(health::Job::AddonUpdates, &troubles.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>());
+    for (id, t) in troubles {
+        health::fail(health::Job::AddonUpdates, &id, t);
+    }
     if !out.changes.is_empty() {
         let mut c = ui.shared.cfg.lock().unwrap();
         for ch in &out.changes {
@@ -1697,10 +1784,11 @@ fn note_auto(app: &AppHandle, off: bool, out: &Updated, waiting: &[String], cat:
         c.save();
     }
     let _ = app.emit("catalog", ());
-    if !out.changes.is_empty() || !out.failed.is_empty() {
-        // only an open window hears these (a quiet notice in the page); a closed window stays closed
+    if !out.changes.is_empty() {
+        // only an open window hears these (a quiet notice in the page); a closed window stays closed. Failures are
+        // not in it: health.rs shows them when (and if) they should be
         let _ = app.emit("settings", ());
-        let _ = app.emit("updated", out.clone());
+        let _ = app.emit("updated", Updated { changes: out.changes.clone(), failed: Vec::new() });
     }
 }
 
@@ -1766,11 +1854,16 @@ fn spawn_updater(app: AppHandle) {
                 let have = ready.as_ref().map(|(u, _)| u.version.clone());
                 match check_app_update(&app, on && may_install, have.as_deref()) {
                     Ok(Some(found)) => {
+                        health::ok(health::Job::AppUpdate, "");
                         ready = Some(found);
                         waiting_logged = false;
                     }
-                    Ok(None) => {}
-                    Err(e) => config::log(&format!("app update: check failed: {e}")),
+                    Ok(None) => health::ok(health::Job::AppUpdate, ""),
+                    Err(e) => {
+                        // retried at the next check (10 minutes); shown only when it keeps failing (health.rs)
+                        config::log(&format!("app update: check failed: {e}"));
+                        health::fail(health::Job::AppUpdate, "", health::Trouble::Unreachable(e.to_string()));
+                    }
                 }
             }
             if !on && ready.take().is_some() {

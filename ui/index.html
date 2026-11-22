@@ -29,35 +29,22 @@
 
     <h2 class="rail-title" id="games-title">Games</h2>
     <ul class="games" id="games" aria-labelledby="games-title"></ul>
-    <button class="add-folder" id="add-folder" type="button">
+    <button class="add-folder" id="add-folder" type="button" title="Add a World of Warcraft folder EverlookDB didn't find by itself">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
-      Add a game folder
+      Add folder
     </button>
 
     <div class="rail-foot">
+      <!-- state only: one quiet line per file and for the Price Feed; every message goes to the inbox (#inbox) -->
       <section class="uploads" aria-labelledby="uploads-title">
-        <h2 class="rail-title" id="uploads-title">Uploads</h2>
+        <h2 class="rail-title rail-head" id="uploads-title">Uploads
+          <button class="text-button quiet" id="upload-now" type="button" title="Send every file now, even unchanged ones">Upload now</button></h2>
         <p class="upload-line"><span class="dot" id="upload-dot"></span><span id="upload-text">Starting…</span></p>
         <ul class="upload-files" id="upload-files" aria-label="Each file's last upload" hidden></ul>
-        <label class="switch">
-          <input type="checkbox" id="sw-uploads" role="switch">
-          <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">Send EverlookDB data</span>
-        </label>
-        <p class="link-row">
-          <button class="text-button" id="upload-now" type="button">Upload now</button>
-          <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com/privacy.html">What gets uploaded</button>
-        </p>
       </section>
       <section class="uploads" aria-labelledby="shared-title">
         <h2 class="rail-title" id="shared-title">Price Feed</h2>
         <p class="upload-line"><span class="dot" id="shared-dot"></span><span id="shared-text">Starting…</span></p>
-        <label class="switch" title="Other players' newest auction scans of your auction houses, for EverlookDB Auctions in game (at the next /reload or login)">
-          <input type="checkbox" id="sw-shared" role="switch">
-          <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">Get the Price Feed</span>
-        </label>
-        <div class="report rail-report" id="shared-report" hidden></div>
       </section>
       <!-- shown only while the giveaway is on (src-tauri/src/giveaway.rs) -->
       <section class="giveaway" id="giveaway" aria-labelledby="giveaway-title" hidden>
@@ -73,22 +60,30 @@
         <ul class="gsteps" id="giveaway-steps" aria-label="What the giveaway needs"></ul>
         <p class="fine" id="giveaway-note"></p>
       </section>
-      <section class="settings" aria-label="Settings">
-        <label class="switch">
+      <section class="settings" aria-labelledby="settings-title">
+        <h2 class="rail-title" id="settings-title">Settings</h2>
+        <label class="switch" title="Uploads what the EverlookDB addons save (when you log out or /reload in game). Nothing else is sent.">
+          <input type="checkbox" id="sw-uploads" role="switch">
+          <span class="track" aria-hidden="true"></span>
+          <span class="switch-label">Send my game data</span>
+        </label>
+        <label class="switch" title="Other players' newest auction scans of your auction houses, for EverlookDB Auctions in game (at the next /reload or login)">
+          <input type="checkbox" id="sw-shared" role="switch">
+          <span class="track" aria-hidden="true"></span>
+          <span class="switch-label">Get the Price Feed</span>
+        </label>
+        <label class="switch" title="Checks every 10 minutes and installs a new version by itself once this window is closed">
           <input type="checkbox" id="sw-app-auto" role="switch">
           <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">Update the app automatically</span>
+          <span class="switch-label">Update the app</span>
         </label>
-        <label class="switch">
+        <label class="switch" title="Checks every 10 minutes and updates the addons EverlookDB installed (frozen ones stay as they are)">
           <input type="checkbox" id="sw-auto" role="switch">
           <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">Update my addons automatically</span>
+          <span class="switch-label">Update my addons</span>
         </label>
-        <p class="fine every-note">Checks for updates every 10 minutes</p>
-        <p class="fine" id="app-update" hidden></p>
         <div class="recent" id="recent" hidden>
-          <h3 class="recent-title">Updated automatically</h3>
-          <ul id="recent-list"></ul>
+          <ul id="recent-list" aria-label="Updated automatically"></ul>
         </div>
         <label class="switch">
           <input type="checkbox" id="sw-start" role="switch">
@@ -96,11 +91,12 @@
           <span class="switch-label" id="start-label">Start with Windows</span>
         </label>
         <p class="fine site">
-          <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com">EverlookDB: the WoW Forever database</button>
-          <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com/addons.html">Addons</button>
+          <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com" title="EverlookDB: the WoW Forever database">everlookdb.com</button>
+          <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com/addons.html" title="Our addons on everlookdb.com">Addons</button>
+          <button class="text-button quiet" type="button" data-act="url" data-url="https://everlookdb.com/privacy.html" title="What gets uploaded, and what never is">Privacy</button>
+          <span id="app-version" class="app-version"></span>
         </p>
         <div class="report foot" id="report-foot" data-shown=""></div>
-        <p class="fine" id="app-version"></p>
       </section>
     </div>
   </nav>
@@ -138,8 +134,8 @@
       </button>
     </div>
 
-    <div class="notice bad upload-alert" id="upload-alert" role="alert" hidden></div>
-    <div class="notice" id="notice" role="status" hidden></div>
+    <!-- the one place for messages: what an action did, what keeps failing, what the player can fix (app.js, inbox) -->
+    <div class="inbox" id="inbox" role="status" aria-live="polite" hidden></div>
     <p class="sr-only" id="announce" aria-live="polite"></p>
 
     <div class="list" id="list" role="tabpanel" aria-labelledby="tab-mine"></div>

@@ -12,7 +12,9 @@
 // folders <account 1> (realm and character folders <realm>/<character>), emails <email>, receipts, giveaway codes,
 // API keys and anything token-like <token>.
 //
-// When the server can't be reached the report is kept as a zip in the settings folder (reports/), for "Show file".
+// When the server can't be reached (or is busy or failing) the report waits in reports/outbox/ and is sent by itself
+// once everlookdb.com is back (flush_outbox); the window says so. Any other refusal keeps it as a zip in the settings
+// folder (reports/), for "Show file".
 
 use crate::catalog::Catalog;
 use crate::config::{self, Config};
@@ -630,13 +632,30 @@ pub fn report_id(s: &str) -> Option<String> {
     (s.len() == 6 && s.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))).then_some(s)
 }
 
-/// Send it. Ok(the report's id), or Err(a sentence for the window).
-pub fn send(server: &str, gz: Vec<u8>) -> Result<String, String> {
+/// Why a report didn't go: a sentence for the window, and whether it goes by itself later (no connection, a busy or
+/// failing server: health::transient_status).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotSent {
+    pub msg: String,
+    pub later: bool,
+}
+
+impl NotSent {
+    pub fn now(msg: impl Into<String>) -> NotSent {
+        NotSent { msg: msg.into(), later: false }
+    }
+    fn later(msg: impl Into<String>) -> NotSent {
+        NotSent { msg: msg.into(), later: true }
+    }
+}
+
+/// Send it. Ok(the report's id), or why not.
+pub fn send(server: &str, gz: Vec<u8>) -> Result<String, NotSent> {
     let http = reqwest::blocking::Client::builder()
         .user_agent(concat!("EverlookDB-Uploader/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(60))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| NotSent::now(e.to_string()))?;
     let resp = http
         .post(reports_url(server))
         .header("content-type", "application/json")
@@ -645,15 +664,90 @@ pub fn send(server: &str, gz: Vec<u8>) -> Result<String, String> {
         .send()
         .map_err(|e| {
             config::log(&format!("report: {}", crate::worker::error_chain(&e)));
-            if e.is_timeout() { "the server didn't answer in time".to_string() } else { "everlookdb.com can't be reached".to_string() }
+            NotSent::later(if e.is_timeout() { "the server didn't answer in time" } else { "everlookdb.com can't be reached" })
         })?;
     let code = resp.status().as_u16();
     let v: Value = resp.bytes().ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let said = v["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("the server answered {code}"));
     match code {
-        200..=299 => v["id"].as_str().and_then(report_id).ok_or_else(|| "the server's answer had no report id".to_string()),
-        429 => Err("too many reports from here just now; try again in a few minutes".into()),
-        _ => Err(v["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("the server answered {code}"))),
+        200..=299 => v["id"].as_str().and_then(report_id).ok_or_else(|| NotSent::now("the server's answer had no report id")),
+        c if crate::health::transient_status(c) => Err(NotSent::later(said)),
+        _ => Err(NotSent::now(said)),
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Reports waiting for the server
+
+/// At most this many reports wait; older ones go (their zip copy stays in reports/).
+const OUTBOX_KEEP: usize = 5;
+
+pub fn outbox_dir() -> PathBuf {
+    reports_dir().join("outbox")
+}
+
+/// A report waiting to be sent: the packed report (`<stamp>.gz`) and what it sat next to (`<stamp>.json`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Waiting {
+    /// the error the button sat next to ('' for "Report a problem")
+    pub shown: String,
+    pub at: String,
+}
+
+/// Put a packed report in the outbox. Keeps the newest OUTBOX_KEEP.
+pub fn queue(dir: &Path, gz: &[u8], shown: &str) -> std::io::Result<()> {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    std::fs::create_dir_all(dir)?;
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let stamp = format!("{}-{n:06}", chrono::Local::now().format("%Y%m%d-%H%M%S%3f"));
+    std::fs::write(dir.join(format!("{stamp}.json")), serde_json::to_vec(&Waiting { shown: shown.to_string(), at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string() }).map_err(std::io::Error::other)?)?;
+    std::fs::write(dir.join(format!("{stamp}.gz")), gz)?;
+    let all = waiting_stamps(dir);
+    for old in all.iter().take(all.len().saturating_sub(OUTBOX_KEEP)) {
+        let _ = std::fs::remove_file(dir.join(format!("{old}.gz")));
+        let _ = std::fs::remove_file(dir.join(format!("{old}.json")));
+    }
+    Ok(())
+}
+
+/// The waiting reports' stamps, oldest first.
+fn waiting_stamps(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".gz").map(str::to_string))
+        .collect();
+    v.sort();
+    v
+}
+
+/// How many reports wait.
+pub fn waiting_count(dir: &Path) -> usize {
+    waiting_stamps(dir).len()
+}
+
+/// Send what waits, oldest first, with `send`; stops at the first one that has to wait again. Returns (what it sat
+/// next to, its id) for each sent. One the server refuses for good leaves the outbox (its zip copy stays).
+pub fn flush_outbox(dir: &Path, send: impl Fn(Vec<u8>) -> Result<String, NotSent>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for stamp in waiting_stamps(dir) {
+        let gz_path = dir.join(format!("{stamp}.gz"));
+        let meta_path = dir.join(format!("{stamp}.json"));
+        let Ok(gz) = std::fs::read(&gz_path) else { continue };
+        let shown = std::fs::read(&meta_path).ok().and_then(|b| serde_json::from_slice::<Waiting>(&b).ok()).map(|w| w.shown).unwrap_or_default();
+        match send(gz) {
+            Ok(id) => {
+                config::log(&format!("problem report sent (it had waited for the server): {id}"));
+                out.push((shown, id));
+            }
+            Err(e) if e.later => break,
+            Err(e) => config::log(&format!("waiting problem report refused, dropped: {}", e.msg)),
+        }
+        let _ = std::fs::remove_file(&gz_path);
+        let _ = std::fs::remove_file(&meta_path);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -807,5 +901,37 @@ mod tests {
         assert_eq!(report_id(" k7q2m9 "), Some("K7Q2M9".into()));
         assert_eq!(report_id("K7Q2MU"), None);
         assert_eq!(report_id("../x"), None);
+    }
+
+    #[test]
+    fn reports_wait_for_the_server_and_go_when_it_is_back() {
+        let dir = std::env::temp_dir().join(format!("edb-outbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        queue(&dir, b"one", "Price Feed: down").unwrap();
+        queue(&dir, b"two", "").unwrap();
+        assert_eq!(waiting_count(&dir), 2);
+        // still down: nothing goes, nothing is lost
+        let sent = flush_outbox(&dir, |_| Err(NotSent { msg: "everlookdb.com can't be reached".into(), later: true }));
+        assert!(sent.is_empty());
+        assert_eq!(waiting_count(&dir), 2);
+        // back: both go, oldest first, with what they sat next to
+        let order = RefCell::new(Vec::new());
+        let sent = flush_outbox(&dir, |gz| {
+            order.borrow_mut().push(gz.clone());
+            Ok(if gz == b"one" { "AAAAAA".into() } else { "BBBBBB".into() })
+        });
+        assert_eq!(sent, vec![("Price Feed: down".to_string(), "AAAAAA".to_string()), (String::new(), "BBBBBB".to_string())]);
+        assert_eq!(*order.borrow(), vec![b"one".to_vec(), b"two".to_vec()]);
+        assert_eq!(waiting_count(&dir), 0);
+        // refused for good: dropped, not tried forever
+        queue(&dir, b"bad", "x").unwrap();
+        assert!(flush_outbox(&dir, |_| Err(NotSent { msg: "too large".into(), later: false })).is_empty());
+        assert_eq!(waiting_count(&dir), 0);
+        // only the newest few wait
+        for i in 0..(OUTBOX_KEEP + 3) {
+            queue(&dir, format!("r{i}").as_bytes(), "").unwrap();
+        }
+        assert_eq!(waiting_count(&dir), OUTBOX_KEEP);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

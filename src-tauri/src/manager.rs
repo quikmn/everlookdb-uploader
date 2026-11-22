@@ -225,6 +225,28 @@ const UNPACK: &str = "The addon couldn't be unpacked (the download may be damage
 const SAVE_ZIP: &str = "EverlookDB couldn't save the download in its data folder. Check that the disk isn't full, then try again.";
 const NEXT_TO_ADDONS: &str = "EverlookDB can't write next to your AddOns folder. Check that the game folder isn't read-only and the disk isn't full, then try again.";
 
+/// An automatic update that didn't work, as the app's one policy sees it (health.rs). None: not a trouble (a folder in
+/// the way: the row offers Replace; frozen). A problem on this PC (files in use, can't write, disk full) is Local and
+/// shown at once; a download that failed or was damaged is Unreachable (tried again at the next check, shown only
+/// when it keeps failing); anything else (the author's zip has no addon in it ...) is Server.
+pub fn failure_trouble(f: &Failed) -> Option<crate::health::Trouble> {
+    use crate::health::Trouble;
+    if !f.conflict.is_empty() || f.message.contains(" is frozen") {
+        return None;
+    }
+    let m = &f.message;
+    let text = format!("Couldn't update {} automatically: {m}", f.name);
+    let local = m.contains("is using") || m.contains("Recycle Bin") || [SAVE_ZIP, NEXT_TO_ADDONS].contains(&m.as_str());
+    let network = m.contains("internet connection") || m.contains("download server") || [DAMAGED, UNPACK].contains(&m.as_str());
+    Some(if local {
+        Trouble::Local(text)
+    } else if network {
+        Trouble::Unreachable(text)
+    } else {
+        Trouble::Server(text)
+    })
+}
+
 /// An error mapper: logs the raw error with `plain`, and gives `plain` (the sentence the player sees).
 fn logged<E: std::fmt::Display>(plain: impl Into<String>) -> impl FnOnce(E) -> String {
     let plain = plain.into();
@@ -1940,5 +1962,23 @@ mod tests {
         recycle(&f).unwrap();
         assert!(!f.exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn automatic_update_failures_follow_the_policy() {
+        use crate::health::Trouble;
+        let f = |message: &str, conflict: Vec<String>| Failed { id: "x".into(), name: "Pawn".into(), message: message.into(), conflict };
+        let t = |m: &str| failure_trouble(&f(m, vec![]));
+        assert!(matches!(t(&status_text(503)), Some(Trouble::Unreachable(_))));
+        assert!(matches!(t(&status_text(404)), Some(Trouble::Server(_))), "the author replaced it: not the network");
+        assert!(matches!(t("No connection to the download server. Check your internet connection, then try again."), Some(Trouble::Unreachable(_))));
+        assert!(matches!(t(DAMAGED), Some(Trouble::Unreachable(_))));
+        let in_use = t("WoW or another program is using Pawn's files. Close WoW (and anything that has the AddOns folder open), then try again.");
+        assert!(matches!(&in_use, Some(Trouble::Local(m)) if m.starts_with("Couldn't update Pawn automatically: WoW or another program")), "{in_use:?}");
+        assert!(matches!(t(NEXT_TO_ADDONS), Some(Trouble::Local(_))));
+        assert!(matches!(t(SAVE_ZIP), Some(Trouble::Local(_))));
+        assert!(matches!(t("The download holds no addon (no .toc file), so nothing was installed."), Some(Trouble::Server(_))));
+        // a folder in the way is the row's Replace button, not a trouble
+        assert_eq!(failure_trouble(&f(&conflict_text(&["Pawn".into()]), vec!["Pawn".into()])), None);
     }
 }

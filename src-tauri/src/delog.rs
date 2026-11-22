@@ -505,20 +505,20 @@ pub fn url(server: &str) -> String {
 pub enum Sent {
     /// the server took the batch: (new, already had, refused)
     Ok(u64, u64, u64),
-    /// try again later (no connection, busy, server error, or a server without the endpoint yet)
-    Later(String),
+    /// try again later (no connection, busy, server error, or a server without the endpoint yet), and why
+    Later(crate::health::Trouble),
 }
 
 pub fn send(http: &reqwest::blocking::Client, server: &str, body: &Value) -> Sent {
     let resp = match http.post(url(server)).header("content-type", "application/json").body(body.to_string()).send() {
         Ok(r) => r,
-        Err(e) => return Sent::Later(if e.is_timeout() { "timed out".into() } else { "can't reach the server".into() }),
+        Err(e) => return Sent::Later(crate::health::Trouble::Unreachable(if e.is_timeout() { "timed out".into() } else { "can't reach the server".into() })),
     };
     let code = resp.status().as_u16();
     let v: Value = resp.bytes().ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     match code {
         200..=299 => Sent::Ok(v["accepted"].as_u64().unwrap_or(0), v["known"].as_u64().unwrap_or(0), v["rejected"].as_u64().unwrap_or(0)),
-        _ => Sent::Later(v["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("the server answered {code}"))),
+        _ => Sent::Later(crate::health::Trouble::of_status(code, v["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("the server answered {code}")))),
     }
 }
 

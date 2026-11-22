@@ -25,6 +25,7 @@
 // Every number and string from the server is checked before it goes into a Lua file: a bad row is skipped, never
 // the house. There are no player names in the data (the server has none to send).
 
+use crate::health::{self, Job, Trouble};
 use crate::config;
 use crate::delog::ODDS_FILE;
 use serde::Serialize;
@@ -592,13 +593,15 @@ const LIST_EVERY: Duration = Duration::from_secs(15 * 60);
 /// How often unchanged checks are summed up in the log (they write nothing else).
 const QUIET_LOG: Duration = Duration::from_secs(15 * 60);
 
-/// Server or network failures in a row before the Price Feed says so (2 min, then 4 min apart: about 6 min).
-pub const SHOW_AFTER: u32 = 3;
-
-/// Whether a failed check is shown: at once when the app can't write the data addon (nothing a retry fixes),
-/// otherwise from the SHOW_AFTER-th failure in a row.
-pub fn shows_failure(failures: u32, msg: &str) -> bool {
-    msg.starts_with("can't write") || failures >= SHOW_AFTER
+/// A failed check as the app's one policy sees it (health.rs): the data addon that can't be written (`local`, in plain
+/// words) is shown at once; a server that is busy, failing or unreachable, or an answer that isn't usable, is retried
+/// quietly and only shown after health::QUIET_FOR.
+pub fn trouble_of(e: &Fail, local: Option<String>) -> Trouble {
+    match local {
+        Some(m) => Trouble::Local(m),
+        None if e.stop => Trouble::Unreachable(e.msg.clone()),
+        None => Trouble::Server(e.msg.clone()),
+    }
 }
 
 /// The wait before the next check. `failures`: errors in a row (0 after a success); `retry_after`: what the server
@@ -775,6 +778,11 @@ impl Poller {
         }
     }
 
+    /// The last refresh failed (the command line's exit code).
+    pub fn failing(&self) -> bool {
+        self.failures > 0
+    }
+
     /// The cheap check, about once a minute: when the folder no longer holds what the app last wrote (its .toc
     /// changed, or a house file is gone: CurseForge updated the addon and brought back its empty copy), writes it again
     /// from the houses in memory, without asking the server. Returns whether it wrote.
@@ -824,12 +832,14 @@ impl Poller {
             if write_stub(&addons).unwrap_or(false) {
                 config::log("price feed: off, the data addon is empty again");
             }
+            health::ok(Job::PriceFeed, "");
             return (View { on: false, houses: vec![], note: None }, EVERY);
         }
         if !addons.join(READER).is_dir() {
+            health::ok(Job::PriceFeed, "");
             self.last = None;
             let _ = write_stub(&addons);
-            return (View { on, houses: vec![], note: Some("Install EverlookDB Auctions to use them".into()) }, EVERY);
+            return (View { on, houses: vec![], note: Some("Needs EverlookDB Auctions".into()) }, EVERY);
         }
         let now = unix_now();
         let mut error: Option<Fail> = None;
@@ -957,9 +967,11 @@ impl Poller {
             w
         };
         let mut wrote = false;
+        let mut local = None;
         match write {
             Err(e) => {
                 config::log(&format!("price feed: can't write {FOLDER}: {e}"));
+                local = Some(health::local_words(&e, "the Price Feed addon"));
                 error.get_or_insert_with(|| Fail::new(format!("can't write the data addon ({e})")));
             }
             Ok(true) => {
@@ -976,15 +988,12 @@ impl Poller {
                 self.hold_until = e.retry_after.map(|r| Instant::now() + r.min(MAX_RETRY_AFTER));
                 config::log(&format!("price feed: {}; trying again in {}", e.msg, words(wait)));
                 // a short server hiccup (a restart while the site updates answers 502 for a minute) is retried
-                // quietly; only SHOW_AFTER failures in a row, or a local problem, are shown and kept for reports
-                if shows_failure(self.failures, &e.msg) {
-                    crate::report::note_error("price feed", &format!("Price Feed: {}", e.msg));
-                    (wait, Some(format!("Last check failed: {}", e.msg)))
-                } else {
-                    (wait, None)
-                }
+                // quietly; health.rs decides when (and whether) the player hears of it, in the window's one inbox
+                health::fail(Job::PriceFeed, "", trouble_of(&e, local));
+                (wait, None)
             }
             None => {
+                health::ok(Job::PriceFeed, "");
                 self.failures = 0;
                 self.hold_until = None;
                 if !changed && !wrote {
@@ -996,7 +1005,7 @@ impl Poller {
                         self.quiet_logged = Some(Instant::now());
                     }
                 }
-                let note = list.is_empty().then(|| "No one has uploaded a scan of your auction houses yet".to_string());
+                let note = list.is_empty().then(|| "No scans of your auction houses yet".to_string());
                 (next_wait(0, None, jitter()), note)
             }
         };
@@ -1462,7 +1471,7 @@ mod tests {
         let (view, wait) = p.refresh(&root, true);
         assert_eq!(take_log().len(), 1, "one request, then it stops");
         assert!(wait >= Duration::from_secs(300) && wait <= Duration::from_secs(305), "{wait:?}");
-        assert!(view.note.is_none() && view.houses.len() == 1, "a first failure is retried quietly (shows_failure)");
+        assert!(view.note.is_none() && view.houses.len() == 1, "a failure is never the view's note (health.rs)");
         assert!(p.hold_until.is_some());
         fake.lock().unwrap().busy = Some(1);
         let (_, wait) = p.refresh(&root, true);
@@ -1490,11 +1499,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
-    fn a_short_server_hiccup_is_retried_quietly() {
-        assert!(!shows_failure(1, "the server answered 502"));
-        assert!(!shows_failure(2, "the server answered 502"));
-        assert!(shows_failure(3, "the server answered 502"));
-        assert!(shows_failure(1, "can't write the data addon (denied)"));
+    fn failures_follow_the_one_policy() {
+        let busy = Fail { msg: "the server answered 502".into(), retry_after: None, stop: true };
+        assert_eq!(trouble_of(&busy, None), Trouble::Unreachable("the server answered 502".into()));
+        assert_eq!(trouble_of(&Fail::new("a bad answer"), None), Trouble::Server("a bad answer".into()));
+        // the data addon can't be written: shown at once, whatever the server did
+        assert!(trouble_of(&busy, Some("EverlookDB isn't allowed to change the Price Feed addon.".into())).is_local());
     }
 
 }

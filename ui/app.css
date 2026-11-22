@@ -159,12 +159,15 @@ button { cursor: pointer; }
 .rail-foot {
   margin-top: auto;
   display: grid;
-  gap: 18px;
-  padding-top: 16px;
+  gap: 14px;
+  padding-top: 14px;
   border-top: 1px solid var(--line);
 }
-.uploads, .settings, .giveaway { display: grid; gap: 8px; padding: 0 8px; }
-.uploads .rail-title, .giveaway .rail-title { margin: 0; }
+.uploads, .settings, .giveaway { display: grid; gap: 6px; padding: 0 8px; }
+.uploads .rail-title, .giveaway .rail-title, .settings .rail-title { margin: 0; }
+/* a section title with its one action on the right ("Uploads · Upload now") */
+.rail-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.rail-head .text-button { padding: 0; text-transform: none; letter-spacing: 0; font-weight: 400; }
 
 .upload-line {
   margin: 0;
@@ -186,18 +189,11 @@ button { cursor: pointer; }
 .dot.busy { background: var(--warn); }
 .dot.error { background: var(--bad); }
 
-/* one row per watched file: its last upload's answer */
-.upload-files { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
-.ufile { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; color: var(--ink-2); }
-.ufile-body { min-width: 0; display: grid; gap: 1px; }
-.ufile p { margin: 0; overflow-wrap: anywhere; }
-.ufile-head { display: flex; gap: 8px; align-items: baseline; }
-.ufile-name { color: var(--ink); font-weight: 600; }
-.ufile-when { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
-.ufile.partial .ufile-say, .ufile.retry .ufile-say { color: var(--warn); }
-.ufile.failed .ufile-say { color: var(--bad); }
-.ufile-why { margin: 2px 0 0; padding: 0; list-style: none; display: grid; gap: 1px; color: var(--ink-3); font-size: 12px; overflow-wrap: anywhere; }
-.ufile-next { color: var(--ink-3); font-size: 12px; }
+/* one quiet line per watched file: "Auctions  sent 14:06" (the whole answer on hover) */
+.upload-files { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; }
+.ufile { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; color: var(--ink-2); cursor: default; }
+.ufile-name { color: var(--ink); font-weight: 600; white-space: nowrap; }
+.ufile-say { min-width: 0; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* the giveaway code (only while a giveaway is on): a plain copy button, never the gold one */
 .gcode {
@@ -278,11 +274,8 @@ button { cursor: pointer; }
 .switch input:focus-visible + .track { outline: 2px solid var(--sky); outline-offset: 2px; }
 .switch:hover .switch-label { color: var(--ink); }
 
-/* under the update switches: how often, the app's own update, and a quiet list of what updated by itself */
-.every-note { margin: -4px 0 0 40px; }
-#app-update { margin: 0 0 0 40px; color: var(--ink-2); }
-.recent { margin: 2px 0 2px 40px; }
-.recent-title { margin: 0 0 2px; font-size: 12px; font-weight: 500; color: var(--ink-3); }
+/* under the update switches: a quiet list of what updated by itself */
+.recent { margin: -2px 0 2px 40px; }
 .recent ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 1px; }
 .recent li { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recent-when { color: var(--ink-3); }
@@ -301,7 +294,8 @@ button { cursor: pointer; }
 .link-row { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .text-button.quiet { color: var(--ink-3); font-size: 12px; }
 .text-button.quiet:hover { color: var(--sky); }
-.site { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.site { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.app-version { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 /* ----------------------------------------------------------------------------- main */
 
@@ -493,32 +487,43 @@ button { cursor: pointer; }
 }
 .search input:focus ~ kbd, .search input:not(:placeholder-shown) ~ kbd { display: none; }
 
-/* notice: what just changed */
+/* the inbox: the app's one place for messages, a few calm cards, newest first (app.js) */
 
+.inbox { margin: 0 36px 10px; display: grid; gap: 6px; }
+.inbox[hidden] { display: none; }
 .notice {
-  margin: 0 36px 10px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-radius: var(--r-m);
   background: var(--raise);
   border: 1px solid var(--line-2);
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 6px 16px;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 4px 10px;
   animation: drop 0.22s ease-out;
 }
-.notice.bad { border-color: rgba(255, 143, 134, 0.45); }
-.notice h3 { margin: 0; font-size: 14px; font-weight: 600; }
-.notice ul { margin: 0; padding: 0; list-style: none; grid-column: 1; display: grid; gap: 2px; color: var(--ink-2); font-size: 13px; }
+.note-icon { width: 16px; height: 16px; margin-top: 1px; fill: none; stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.notice.ok .note-icon { stroke: var(--ok); }
+.notice.info .note-icon { stroke: var(--sky); }
+.notice.down .note-icon, .notice.local .note-icon { stroke: var(--warn); }
+.notice.bad { border-color: rgba(255, 143, 134, 0.35); }
+.notice.bad .note-icon { stroke: var(--bad); }
+.note-body { min-width: 0; display: grid; gap: 4px; }
+.notice h3 { margin: 0; font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
+.notice.info h3, .notice.down h3 { font-weight: 500; color: var(--ink-2); }
+.notice p { margin: 0; }
+.notice ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; color: var(--ink-2); font-size: 13px; }
 .notice .from { color: var(--ink-3); text-decoration: line-through; text-decoration-color: rgba(163, 176, 196, 0.5); }
-.notice .where { color: var(--ink-3); }
+.notice .where { color: var(--ink-3); font-size: 12.5px; }
 .notice .to { color: var(--ink); font-variant-numeric: tabular-nums; }
-.notice .close { grid-column: 2; grid-row: 1; align-self: start; }
-.upload-alert h3 { color: var(--bad); }
+.note-x { border: 0; background: none; padding: 2px; border-radius: var(--r-s); color: var(--ink-3); line-height: 0; }
+.note-x:hover { color: var(--ink); background: var(--raise-2); }
+.note-x svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 
 /* "Send error logs to the developer" (app.js, problem reports): a plain button next to an error, a quiet entry in the
    sidebar's footer */
 
-.report { grid-column: 1 / -1; display: grid; gap: 4px; margin-top: 4px; }
+.report { display: grid; gap: 4px; margin-top: 2px; }
 .report[hidden] { display: none; }
 .report-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .report-row .btn { font-weight: 600; }
@@ -546,8 +551,6 @@ button { cursor: pointer; }
 .report.foot { margin-top: 0; gap: 2px; }
 .report.foot .report-row { gap: 4px 10px; }
 .report.foot .report-done { font-size: 12px; }
-.rail-report .btn { font-size: 12px; padding: 5px 10px; white-space: normal; text-align: left; }
-.rail-report .report-what { flex-basis: 100%; max-width: none; }
 
 @keyframes drop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
@@ -962,7 +965,7 @@ button { cursor: pointer; }
 @media (max-width: 900px) {
   .app { grid-template-columns: 220px 1fr; }
   .hero, .toolbar, .list, .status { padding-left: 22px; padding-right: 22px; }
-  .notice { margin-left: 22px; margin-right: 22px; }
+  .inbox { margin-left: 22px; margin-right: 22px; }
   :root { --ico: 32px; }
   .row-main { grid-template-columns: var(--ico) minmax(0, 1fr) var(--ver, 90px) 160px; gap: 14px; }
   .hero-name, .hero-version .num { font-size: 32px; }

@@ -5,7 +5,9 @@
 - Update all with nothing to update no longer shows a second "up to date" box: the bar says it, with when it checked. Update all is only gold when there is something to update.
 - Slim scrollbars in the app's colours.
 - The Price Feed no longer reports a problem when the site is briefly unavailable; it tries again quietly and only says so if it keeps failing.
-- The update switches now read "Update the app automatically" and "Update my addons automatically".
+- The switches are grouped under Settings and read "Update the app" and "Update my addons" (hover one to see what it does).
+- The app now fixes hiccups by itself and stays quiet about them. It only speaks up when something keeps failing, or when there is something you can fix, and your data always waits and goes out later.
+- One place for messages at the top of the window, and a shorter, tidier sidebar.
 
 ## v0.7.7 (2026-11-22)
 

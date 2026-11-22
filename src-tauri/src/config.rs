@@ -47,7 +47,8 @@ pub struct Done {
 /// stays visible (and is retried) after the app starts again.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct FileState {
-    /// "ok" (all taken), "partial" (some refused or skipped), "retry" (failed once, trying again), "failed"
+    /// "ok" (all taken), "partial" (some refused or skipped), "info" (refused: the server's reason, not an error),
+    /// "failed" (a problem on this PC, e.g. too large), "idle" (not answered yet); older versions also wrote "retry"
     pub level: String,
     /// one sentence: the server's message, or one made from its counts
     pub headline: String,
@@ -63,6 +64,10 @@ pub struct FileState {
     /// failed tries in a row
     #[serde(default)]
     pub failures: u32,
+    /// while the server can't be reached: since when (unix seconds). The last answer above stays as it was; the
+    /// window says "waiting" only after health::QUIET_FOR.
+    #[serde(default)]
+    pub failing_since: Option<i64>,
 }
 
 /// The server's receipt for an accepted upload (8 characters), for the giveaway code (see giveaway.rs).

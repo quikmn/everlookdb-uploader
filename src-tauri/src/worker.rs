@@ -2,15 +2,19 @@
 // writing it. A cheap poll (every few seconds, file size and time only) instead of a file watcher: the
 // game rewrites the file whole on logout or /reload, so this catches every save with no extra crates.
 //
-// A failed upload is never dropped: it stays on screen (amber or red, with the server's words) and is sent again,
-// at once when the file changes, otherwise after 1, 5, 15 and 30 minutes and then every hour for as long as it
-// keeps failing (a refused file: every hour), and right away when the app starts.
+// A failed upload is never dropped. Following the app's one policy (health.rs): when the server can't be reached it is
+// sent again quietly, at once when the file changes, otherwise after about 1, 2, 5 and 10 minutes and then every 15
+// for as long as it keeps failing, at once when another everlookdb.com job works again, and right away when the app
+// starts; the file's row keeps its last answer, and only after health::QUIET_FOR does it say "waiting". A file the
+// server refused (its reason is information, not an error) is shown quietly and sent again when it changes (some
+// refusals also hourly). A problem on this PC (too large, can't be read) is shown at once.
 //
 // Privacy: the request body is the file's bytes (gzip-compressed for auction files) and nothing else. The file
 // path (which holds the account folder name) is only used locally; the window and the log name a file by what it
 // is ("Auctions", "Game data") and, with several accounts, by number, never by the account's name.
 
 use crate::config::{self, Config, Done, FileState, Receipt};
+use crate::health::{self, Job, Trouble};
 use crate::{giveaway, wow};
 use serde::Serialize;
 use serde_json::Value;
@@ -80,14 +84,16 @@ pub struct Status {
 pub struct FileView {
     /// "Auctions", "Game data"; "Auctions, account 2" when there are several accounts
     pub label: String,
-    /// "ok", "partial", "retry", "failed" or "idle"
+    /// "ok", "partial", "info" (refused, with the server's reason), "retry" (waiting for the server, after
+    /// health::QUIET_FOR), "failed" (a problem on this PC) or "idle"
     pub level: String,
+    /// a word or two for the rail: "sent", "partly taken", "not taken", "waiting", "not sent", "waiting for a save"
+    pub short: String,
+    /// the whole answer (the rail's hover text)
     pub headline: String,
     pub details: Vec<String>,
     /// when the last answer came ("14:05", or "16 Nov 14:05" on another day)
     pub when: Option<String>,
-    /// "Trying again at 15:05" while it keeps failing
-    pub next: Option<String>,
 }
 
 pub struct Shared {
@@ -310,14 +316,15 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// How long to wait after this many failed tries in a row: 1, 5, 15, 30 minutes, then every hour for good.
+/// How long to wait after this many failed tries in a row: 1, 2, 5, 10 minutes, then every 15 for good (a tenth more
+/// at random is added, so the players' retries spread out).
 pub fn backoff(failures: u32) -> Duration {
     Duration::from_secs(match failures {
         0 | 1 => 60,
-        2 => 5 * 60,
-        3 => 15 * 60,
-        4 => 30 * 60,
-        _ => 60 * 60,
+        2 => 2 * 60,
+        3 => 5 * 60,
+        4 => 10 * 60,
+        _ => 15 * 60,
     })
 }
 
@@ -481,7 +488,14 @@ struct Track {
     seen: Option<(u64, Option<SystemTime>)>,
     /// while it keeps failing: when to try again (none after a start: a failure from before is tried at once)
     retry_at: Option<Instant>,
+    /// the server couldn't be reached: health::back() then (it is tried at once when that moves on)
+    back: Option<u64>,
+    /// since when the file couldn't be read because something holds it
+    locked: Option<Instant>,
 }
+
+/// A file the game (or something) holds this long is said to be in use; shorter is the game saving it.
+const LOCKED_FOR: Duration = Duration::from_secs(60);
 
 pub struct Watcher {
     shared: Arc<Shared>,
@@ -522,7 +536,7 @@ impl Watcher {
             (c.wow_dir.clone(), c.paused)
         };
         let Some(dir) = dir else {
-            return Status { kind: Kind::Error, line: "WoW Forever folder not set".into(), files: 0, views: Vec::new() };
+            return Status { kind: Kind::Idle, line: "No WoW Forever folder".into(), files: 0, views: Vec::new() };
         };
         let files = wow::data_files(&dir);
         let names = labels(&files);
@@ -544,7 +558,7 @@ impl Watcher {
             if !now && ((changed && !first) || age < SETTLE) {
                 continue; // the game may still be writing it
             }
-            let due = t.retry_at.map_or(true, |r| r <= Instant::now());
+            let due = t.retry_at.map_or(true, |r| r <= Instant::now()) || t.back.is_some_and(|b| health::back() > b);
             let de_due = self.de_retry.get(f).is_some_and(|r| *r <= Instant::now());
             if !force && t.seen == Some(sig) && !(t.retry_at.is_some() && due) && !de_due {
                 continue; // unchanged since the last look, and no retry due: no need to read it
@@ -554,8 +568,10 @@ impl Watcher {
                 let known = self.shared.cfg.lock().unwrap().done.get(&k).is_some_and(|d| !d.ok && d.hash == "too-big");
                 t.seen = Some(sig);
                 t.retry_at = None;
+                let mb = max_for(f) / 1024 / 1024;
+                health::fail(Job::Uploads, &format!("{label}/size"), Trouble::Local(too_big_text(label, mb)));
                 if !known || force {
-                    let why = format!("{} is larger than {} MB", file_name(f), max_for(f) / 1024 / 1024);
+                    let why = format!("{} is larger than {mb} MB", file_name(f));
                     let state = FileState { level: "failed".into(), headline: format!("Not sent: {why}"), at: unix_now(), ..Default::default() };
                     config::log(&format!("{label}: not sent: {why}"));
                     crate::report::note_error("upload", &format!("{label}: not sent: {why}"));
@@ -564,7 +580,24 @@ impl Watcher {
                 }
                 continue;
             }
-            let Ok(bytes) = std::fs::read(f) else { continue }; // locked mid-write: next poll
+            health::ok(Job::Uploads, &format!("{label}/size"));
+            let bytes = match std::fs::read(f) {
+                Ok(b) => {
+                    t.locked = None;
+                    health::ok(Job::Uploads, &format!("{label}/read"));
+                    b
+                }
+                Err(e) => {
+                    // the game saving it holds it for a moment: only a lasting hold, or no permission, is said
+                    let held = matches!(e.raw_os_error(), Some(32) | Some(33));
+                    let since = *t.locked.get_or_insert_with(Instant::now);
+                    if !held || since.elapsed() >= LOCKED_FOR {
+                        let what = format!("the {} file", label.to_lowercase());
+                        health::fail(Job::Uploads, &format!("{label}/read"), Trouble::Local(health::local_words(&e, &what).replace("can't save", "can't read")));
+                    }
+                    continue;
+                }
+            };
             if bytes.is_empty() {
                 continue;
             }
@@ -585,11 +618,16 @@ impl Watcher {
             UPLOADING.store(true, std::sync::atomic::Ordering::SeqCst);
             let outcome = upload(&self.http, &self.shared.server, &bytes, is_auctions(f));
             UPLOADING.store(false, std::sync::atomic::Ordering::SeqCst);
+            if !matches!(outcome, Outcome::Busy(_) | Outcome::Failed(_)) {
+                // the server answered: not a trouble, whatever it said
+                t.back = None;
+                health::ok(Job::Uploads, label);
+            }
             match outcome {
                 Outcome::Sent(ans) => {
                     t.retry_at = None;
                     let level = if ans.partial() { "partial" } else { "ok" };
-                    let state = FileState { level: level.into(), headline: ans.text.clone(), details: ans.reasons(), at, next_retry: None, failures: 0 };
+                    let state = FileState { level: level.into(), headline: ans.text.clone(), details: ans.reasons(), at, next_retry: None, failures: 0, failing_since: None };
                     let line = if ans.is_auctions() { format!("Auctions: {}", ans.text) } else { ans.text.clone() };
                     let line = format!("{} · {line}", chrono::Local::now().format("%H:%M"));
                     config::log(&format!("{label} ({}): {}", file_name(f), ans.text));
@@ -619,13 +657,15 @@ impl Watcher {
                     let for_good = refused_for_good(code, &scans);
                     t.retry_at = if for_good { None } else { Some(Instant::now() + REFUSED_RETRY) };
                     let next = at + REFUSED_RETRY.as_secs() as i64;
+                    // the server's reason: information for the player, not an error
                     let state = FileState {
-                        level: "failed".into(),
+                        level: "info".into(),
                         headline: format!("Not accepted: {message}"),
                         details: rejected_lines(&scans),
                         at,
                         next_retry: if for_good { None } else { Some(next) },
                         failures,
+                        failing_since: None,
                     };
                     let when = if for_good { "sent again when the file changes".to_string() } else { format!("trying again at {}", clock(next)) };
                     config::log(&format!("{label} ({}) not accepted ({code}): {message}; {when}", file_name(f)));
@@ -634,46 +674,28 @@ impl Watcher {
                         config::log(&scan_log(s));
                     }
                     remember(&self.shared, &k, hash, false, state, None);
-                    event = Some((Kind::Error, format!("{label} not accepted: {message}")));
+                    event = Some((Kind::Busy, format!("{label} not accepted: {message}")));
                 }
                 Outcome::Busy(wait) => {
-                    let failures = failures + 1;
+                    // 429: what Retry-After asks (busy_wait), for every file
                     self.blocked_until = Some(Instant::now() + wait);
                     t.retry_at = Some(Instant::now() + wait);
-                    let next = at + wait.as_secs() as i64;
-                    let state = FileState {
-                        level: if failures >= 2 { "failed" } else { "retry" }.into(),
-                        headline: "The server is busy".into(),
-                        details: Vec::new(),
-                        at,
-                        next_retry: Some(next),
-                        failures,
-                    };
-                    config::log(&format!("{label} ({}): server busy, trying again at {}", file_name(f), clock(next)));
-                    if failures >= 2 {
-                        crate::report::note_error("upload", &format!("{label} ({}): the server is busy ({failures} tries)", file_name(f)));
-                    }
-                    remember(&self.shared, &k, hash, false, state, None);
-                    event = Some((Kind::Busy, format!("Server busy, trying again in {} s", wait.as_secs())));
+                    t.back = Some(health::back());
+                    config::log(&format!("{label} ({}): server busy, trying again in {} s", file_name(f), wait.as_secs()));
+                    let since = waiting(&self.shared, &k, hash, at, at + wait.as_secs() as i64);
+                    health::fail_since(Job::Uploads, label, Trouble::Unreachable("the server is busy".into()), since);
+                    event = (at - since >= health::QUIET_FOR).then(|| (Kind::Busy, format!("{label}: waiting for everlookdb.com")));
                 }
                 Outcome::Failed(why) => {
-                    let failures = failures + 1;
-                    let wait = backoff(failures);
+                    let wait = backoff(failures + 1);
+                    let wait = wait + health::jitter(wait / 10);
                     t.retry_at = Some(Instant::now() + wait);
+                    t.back = Some(health::back());
                     let next = at + wait.as_secs() as i64;
-                    let state = FileState {
-                        level: if failures >= 2 { "failed" } else { "retry" }.into(),
-                        headline: format!("Upload failed: {why}"),
-                        details: Vec::new(),
-                        at,
-                        next_retry: Some(next),
-                        failures,
-                    };
-                    config::log(&format!("{label} ({}): upload failed ({why}), try {failures}; trying again at {}", file_name(f), clock(next)));
-                    crate::report::note_error("upload", &format!("{label} ({}): upload failed ({why}), try {failures}", file_name(f)));
-                    remember(&self.shared, &k, hash, false, state, None);
-                    let kind = if failures >= 2 { Kind::Error } else { Kind::Busy };
-                    event = Some((kind, format!("{label}: upload failed ({why}), trying again at {}", clock(next))));
+                    config::log(&format!("{label} ({}): upload failed ({why}), try {}; trying again at {}", file_name(f), failures + 1, clock(next)));
+                    let since = waiting(&self.shared, &k, hash, at, next);
+                    health::fail_since(Job::Uploads, label, Trouble::Unreachable(why), since);
+                    event = (at - since >= health::QUIET_FOR).then(|| (Kind::Busy, format!("{label}: waiting for everlookdb.com")));
                 }
             }
         }
@@ -720,14 +742,16 @@ impl Watcher {
         for b in crate::delog::batches(&todo, crate::delog::BATCH) {
             match crate::delog::send(&self.http, &self.shared.server, &crate::delog::body(&secret, b)) {
                 crate::delog::Sent::Ok(a, k2, r) => {
+                    health::ok(Job::Disenchants, label);
                     (new, known, refused) = (new + a, known + k2, refused + r);
                     let last = b.last().map_or(mark, |e| e.t);
                     let mut c = self.shared.cfg.lock().unwrap();
                     c.de_sent.insert(k.clone(), last);
                     c.save();
                 }
-                crate::delog::Sent::Later(why) => {
-                    config::log(&format!("{label}: disenchants not sent ({why}); trying again in 15 min"));
+                crate::delog::Sent::Later(trouble) => {
+                    config::log(&format!("{label}: disenchants not sent ({}); trying again in 15 min", trouble_text(&trouble)));
+                    health::fail(Job::Disenchants, label, trouble);
                     self.de_retry.insert(f.to_path_buf(), Instant::now() + DE_RETRY);
                     break;
                 }
@@ -738,7 +762,8 @@ impl Watcher {
         }
     }
 
-    /// The window's rows: each file's last answer.
+    /// The window's rows: each file's last answer. While the server can't be reached the last answer stays, until
+    /// health::QUIET_FOR has passed: then "waiting".
     fn views(&self, files: &[PathBuf], names: &[String]) -> Vec<FileView> {
         let c = self.shared.cfg.lock().unwrap();
         let now = unix_now();
@@ -748,27 +773,79 @@ impl Watcher {
             .map(|(f, label)| {
                 let k = key(&self.shared.server, f);
                 match c.uploads.get(&k) {
-                    Some(s) => FileView {
-                        label: label.clone(),
-                        level: s.level.clone(),
-                        headline: s.headline.clone(),
-                        details: s.details.clone(),
-                        when: (s.at > 0).then(|| clock(s.at)),
-                        next: s.next_retry.map(|t| if t > now { format!("Trying again at {}", clock(t)) } else { "Trying again now".into() }),
-                    },
+                    Some(s) => view_of(label, s, now),
                     None => FileView {
                         label: label.clone(),
                         level: "idle".into(),
+                        short: "waiting for a save".into(),
                         headline: match c.done.get(&k) {
                             Some(d) if d.ok => "Sent".into(),
-                            Some(_) => "Sending again".into(),
-                            None => "Waiting for the next save".into(),
+                            Some(_) => "Waiting to be sent".into(),
+                            None => "Waiting for the next save (log out or /reload in game)".into(),
                         },
                         ..Default::default()
                     },
                 }
             })
             .collect()
+    }
+}
+
+/// One file's row from what is remembered of it, at `now`.
+pub fn view_of(label: &str, s: &FileState, now: i64) -> FileView {
+    if s.failing_since.is_some_and(|t| now - t >= health::QUIET_FOR) {
+        let since = s.failing_since.unwrap_or(now);
+        return FileView {
+            label: label.to_string(),
+            level: "retry".into(),
+            short: "waiting".into(),
+            headline: format!("Waiting for everlookdb.com since {}; the file is kept and sent when it's back", clock(since)),
+            details: Vec::new(),
+            when: Some(clock(since)),
+        };
+    }
+    // "retry" was an older version's word for a failure: quiet now
+    let level = if s.level == "retry" { "idle" } else { s.level.as_str() };
+    let short = match level {
+        "ok" => "sent",
+        "partial" => "partly taken",
+        "info" => "not taken",
+        "failed" => "not sent",
+        _ => "waiting to send",
+    };
+    FileView {
+        label: label.to_string(),
+        level: level.into(),
+        short: short.into(),
+        headline: if level == "idle" && s.headline.starts_with("Upload failed") { "Waiting to be sent".into() } else { s.headline.clone() },
+        details: s.details.clone(),
+        when: (s.at > 0 && level != "idle").then(|| clock(s.at)),
+    }
+}
+
+/// The plain words for a file over the size limit.
+fn too_big_text(label: &str, mb: u64) -> String {
+    format!("{label}: the file is larger than {mb} MB, so it isn't sent. It goes again by itself once it is smaller (fewer saved scans).")
+}
+
+/// The server couldn't be reached for this file: the last answer stays as it is (nothing is shown before
+/// health::QUIET_FOR), with the try counted and when it started. Returns since when it fails.
+fn waiting(shared: &Shared, key: &str, hash: String, at: i64, next: i64) -> i64 {
+    let mut c = shared.cfg.lock().unwrap();
+    let mut state = c.uploads.get(key).cloned().unwrap_or_else(|| FileState { level: "idle".into(), headline: "Waiting to be sent".into(), ..Default::default() });
+    let since = state.failing_since.unwrap_or(at);
+    state.failures += 1;
+    state.next_retry = Some(next);
+    state.failing_since = Some(since);
+    c.done.insert(key.to_string(), Done { hash, ok: false });
+    c.uploads.insert(key.to_string(), state);
+    c.save();
+    since
+}
+
+fn trouble_text(t: &Trouble) -> &str {
+    match t {
+        Trouble::Unreachable(m) | Trouble::Server(m) | Trouble::Local(m) => m,
     }
 }
 
@@ -882,8 +959,8 @@ mod tests {
     #[test]
     fn backoff_schedule() {
         let mins: Vec<u64> = (1..=8).map(|n| backoff(n).as_secs() / 60).collect();
-        assert_eq!(mins, vec![1, 5, 15, 30, 60, 60, 60, 60]);
-        assert_eq!(backoff(1000), Duration::from_secs(3600));
+        assert_eq!(mins, vec![1, 2, 5, 10, 15, 15, 15, 15]);
+        assert_eq!(backoff(1000), Duration::from_secs(900));
         assert_eq!(REFUSED_RETRY, Duration::from_secs(3600));
         // scans refused for what they say: only a changed file is sent again; a file the server couldn't read, hourly
         let (_, scans) = parse_refusal(&json!({"message": "1 scan refused", "scans": [{"house": "EU-0-Alliance", "result": "rejected", "reason": "no realm"}]}));
@@ -925,5 +1002,29 @@ mod tests {
         assert_eq!(one, vec!["Game data", "Auctions"]);
         let two = labels(&[f("A", AUCTIONS), f("B", "EverlookDB.lua"), f("B", AUCTIONS)]);
         assert_eq!(two, vec!["Auctions, account 1", "Game data, account 2", "Auctions, account 2"]);
+    }
+
+    #[test]
+    fn a_failing_upload_keeps_its_last_answer_until_the_threshold() {
+        let t = 1_800_000_000;
+        let sent = FileState { level: "ok".into(), headline: "3 scans accepted".into(), at: t - 100, ..Default::default() };
+        let mut failing = FileState { failures: 3, next_retry: Some(t + 300), failing_since: Some(t), ..sent.clone() };
+        // quiet: the row is the last answer, no retry text
+        for now in [t, t + 60, t + health::QUIET_FOR - 1] {
+            let v = view_of("Auctions", &failing, now);
+            assert_eq!((v.level.as_str(), v.short.as_str(), v.headline.as_str()), ("ok", "sent", "3 scans accepted"), "{now}");
+        }
+        // long: a calm "waiting", never red
+        let v = view_of("Auctions", &failing, t + health::QUIET_FOR);
+        assert_eq!((v.level.as_str(), v.short.as_str()), ("retry", "waiting"));
+        assert!(v.headline.contains("kept and sent when it's back"), "{}", v.headline);
+        // a refusal is information
+        let refused = FileState { level: "info".into(), headline: "Not accepted: No full scans in this file yet".into(), at: t, ..Default::default() };
+        let v = view_of("Auctions", &refused, t);
+        assert_eq!((v.level.as_str(), v.short.as_str()), ("info", "not taken"));
+        // an older version's "retry" / "Upload failed" is quiet now
+        failing = FileState { level: "retry".into(), headline: "Upload failed: can't reach the server".into(), at: t, ..Default::default() };
+        let v = view_of("Auctions", &failing, t);
+        assert_eq!((v.level.as_str(), v.headline.as_str(), v.when.clone()), ("idle", "Waiting to be sent", None));
     }
 }

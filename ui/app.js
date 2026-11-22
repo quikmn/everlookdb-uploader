@@ -127,19 +127,22 @@ function renderRail() {
 function renderSettings() {
   $('sw-auto').checked = S.app.auto_update;
   $('sw-app-auto').checked = S.app.app_auto_update;
-  $('app-update').hidden = !S.app.app_update;
-  $('app-update').textContent = S.app.app_update || '';
+  // the app's own update ("Version 0.7.8 installs by itself once this window is closed"): a quiet inbox line
+  if (S.app.app_update) notify({ kind: 'app', tone: 'info', title: S.app.app_update });
+  else unnotify('app');
   renderRecent(S.app.recent_updates || []);
   renderShared(S.app.shared && { ...S.app.shared, on: S.app.shared_prices });
   $('sw-start').checked = S.app.autostart;
   $('start-label').textContent = S.app.autostart_label;
-  $('app-version').textContent = `EverlookDB ${S.app.version}`;
+  $('app-version').textContent = `v${S.app.version}`;
+  $('app-version').title = `EverlookDB ${S.app.version}`;
+  if (S.app.health) renderHealth(S.app.health);
   paintReport($('report-foot'));
 }
 
 // what updated by itself (newest first, a few lines): "Details! updated to v12.1 · 10 min ago"
 function renderRecent(list) {
-  const shown = list.slice(0, 5);
+  const shown = list.slice(0, 3);
   $('recent').hidden = !shown.length;
   $('recent-list').innerHTML = shown
     .map((u) => `<li title="${esc([u.install, u.from ? `${u.from} → ${u.to}` : u.to, exact(u.at)].filter(Boolean).join(' · '))}">Updated ${esc(u.name)} to ${esc(u.to)}<span class="recent-when"> · ${esc(when(u.at))}</span></li>`)
@@ -161,32 +164,28 @@ function renderShared(v) {
   const houses = v.houses || [];
   let text;
   if (!v.on) text = 'Off';
-  else if (houses.length) text = 'Price Feed: ' + houses.map((h) => `${h.key}, ${sharedAge(h.at)}`).join('; ');
+  else if (houses.length === 1) text = `${houses[0].key} · ${sharedAge(houses[0].at)}`;
+  else if (houses.length) text = `${houses.length} houses · newest ${sharedAge(Math.max(...houses.map((h) => h.at)))}`;
   else text = v.note || 'Looking for your auction houses…';
-  if (v.on && houses.length && v.note) text += ` (${v.note})`;
   $('shared-text').textContent = text;
-  $('shared-text').title = houses.map((h) => `${h.realm} ${h.side} (${h.key})`).join(', ');
+  $('shared-text').title = houses.map((h) => `${h.realm} ${h.side} (${h.key}): ${sharedAge(h.at)}`).join('\n');
   const old = houses.some((h) => Date.now() / 1000 - h.at > 86400);
-  const failing = v.on && !!v.note && v.note.startsWith('Last check failed');
-  $('shared-dot').className = 'dot ' + (!v.on ? '' : failing ? 'busy' : houses.length ? (old ? 'busy' : 'ok') : 'idle');
-  const box = $('shared-report');
-  const shown = failing ? `Price Feed: ${v.note}` : '';
-  if (box.hidden !== !failing || box.dataset.shown !== shown) {
-    box.hidden = !failing;
-    box.dataset.shown = shown;
-    if (failing) paintReport(box);
-  }
+  // a problem that is still there after a while is in the inbox; the dot only turns amber
+  const trouble = (S.health?.lines || []).some((l) => l.kind.startsWith('price-feed') || l.kind === 'site-down');
+  $('shared-dot').className = 'dot ' + (!v.on ? '' : trouble || old ? 'busy' : houses.length ? 'ok' : 'idle');
 }
 setInterval(() => renderShared(S.shared), 30000);
 
-// each file's last answer: green taken, amber partly taken (or failed once), red refused or failing
-const FILE_DOT = { ok: 'ok', partial: 'busy', retry: 'busy', failed: 'error' };
+// each file's last answer, one quiet line: green sent, amber partly taken or waiting for the server, grey refused
+// (the server's reason is information, on hover), red a problem on this PC (the inbox says what to do)
+const FILE_DOT = { ok: 'ok', partial: 'busy', retry: 'busy', info: '', failed: 'error' };
 
 function renderUploads(u) {
   if (!u) return;
   renderGiveaway(u.giveaway);
   $('upload-text').textContent = u.paused ? 'Paused' : u.line;
-  $('upload-dot').className = 'dot ' + (u.paused ? '' : u.kind);
+  $('upload-text').title = u.paused ? 'Turn on “Send my game data” in Settings to upload again' : '';
+  $('upload-dot').className = 'dot ' + (u.paused ? '' : u.kind === 'error' ? 'busy' : u.kind);
   $('sw-uploads').checked = !u.paused;
 
   const files = u.files || [];
@@ -196,35 +195,13 @@ function renderUploads(u) {
   $('upload-text').parentElement.hidden = files.length > 0 && !u.paused;
   list.innerHTML = files
     .map(
-      (f) => `<li class="ufile ${esc(f.level)}">
+      (f) => `<li class="ufile ${esc(f.level)}" title="${esc([f.headline, ...f.details].join('\n'))}">
         <span class="dot ${FILE_DOT[f.level] || ''}"></span>
-        <div class="ufile-body">
-          <p class="ufile-head"><span class="ufile-name">${esc(f.label)}</span>${f.when ? `<span class="ufile-when">${esc(f.when)}</span>` : ''}</p>
-          <p class="ufile-say">${esc(f.headline)}</p>
-          ${f.details.length ? `<ul class="ufile-why">${f.details.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}
-          ${f.next && !u.paused ? `<p class="ufile-next">${esc(f.next)}</p>` : ''}
-        </div>
+        <span class="ufile-name">${esc(f.label)}</span>
+        <span class="ufile-say">${esc(f.short)}${f.when ? ` ${esc(f.when)}` : ''}</span>
       </li>`
     )
     .join('');
-
-  // refused or failing again and again: said at the top of the window too, until it goes through
-  const bad = files.filter((f) => f.level === 'failed');
-  const alert = $('upload-alert');
-  alert.hidden = !bad.length;
-  if (!bad.length) return;
-  alert.innerHTML = `<h3>${esc(bad.length === 1 ? `${bad[0].label} isn't being uploaded` : `${bad.map((f) => f.label).join(', ')} aren't being uploaded`)}</h3>
-    <ul>${bad
-      .map(
-        (f) =>
-          `<li>${bad.length > 1 ? `<span class="where">${esc(f.label)}:</span> ` : ''}${esc(f.headline)}${
-            f.next && !u.paused ? ` <span class="where">· ${esc(f.next)}</span>` : ''
-          }</li>${f.details.map((d) => `<li class="where">${esc(d)}</li>`).join('')}`
-      )
-      .join('')}</ul>
-    <button class="link-button close" type="button" data-act="upload-now">Try now</button>
-    ${reportSlot(bad.map((f) => `${f.label}: ${f.headline}`).join('; '))}`;
-  paintReports();
 }
 
 // ------------------------------------------------------------------------------------------------ giveaway
@@ -281,6 +258,7 @@ async function copyGiveaway() {
 
 function uploadNow() {
   invoke('upload_now');
+  $('upload-text').title = '';
   $('upload-text').textContent = 'Uploading…';
   $('upload-text').parentElement.hidden = false;
 }
@@ -798,9 +776,9 @@ function browseHtml(i) {
       <p>The addon list has a newer format than this version of EverlookDB reads. EverlookDB updates itself within the hour, or get the newest version from everlookdb.com.</p>
       <button class="btn" type="button" data-act="url" data-url="https://everlookdb.com/contribute.html">Open everlookdb.com</button></div>`;
     }
-    return `<div class="empty"><h3>The addon list didn’t load</h3>
-      <p>EverlookDB couldn’t reach everlookdb.com. Check your connection and try again.</p>
-      <button class="btn" type="button" data-act="refresh">Try again</button></div>`;
+    return `<div class="empty"><h3>The addon list isn’t here yet</h3>
+      <p>EverlookDB gets it by itself as soon as everlookdb.com answers.</p>
+      <button class="btn" type="button" data-act="refresh">Try now</button></div>`;
   }
   const q = S.q.trim();
   const installed = new Map(S.items.filter((it) => it.catalog).map((it) => [it.key, it]));
@@ -925,10 +903,10 @@ function renderStatus(text) {
     (S.loading ? (S.catalog ? 'Loading the newest addon list… (showing the one from last time)' : 'Loading the addon list…') : null) ||
     {
       live: `Addon list checked ${when(S.checked)}`,
-      cache: 'Offline: using the addon list from last time',
+      cache: S.checked ? `Addon list checked ${when(S.checked)}` : 'Addon list from last time',
       sample: 'Sample addon list: the everlookdb.com catalog isn’t live yet',
       outdated: 'Update the app: the addon list has a newer format than this version reads',
-      none: 'The addon list couldn’t load',
+      none: 'Waiting for the addon list',
     }[S.origin] ||
     'Loading the addon list…';
   const auto = text ? '' : autoLine();
@@ -947,49 +925,124 @@ function reloadLine(changes) {
     : `<p class="where">${n === 1 ? 'It loads' : 'They load'} the next time you start WoW (or type /reload if it’s open).</p>`;
 }
 
-function showChanges(title, changes, failed = []) {
-  const n = $('notice');
-  n.className = 'notice' + (failed.length && !changes.length ? ' bad' : '');
+// The one place for messages (#inbox, at the top of the main pane, where the eye already is: nothing hides behind a
+// bell). Every notice lands here: what an action did, what keeps failing in the background (health.rs: shown only
+// after half an hour, one line when the site is down), what the player can fix, the app's own update. A notice
+// replaces the last one of its kind; a dismissed one stays dismissed (the background's across restarts); at most
+// INBOX_MAX show, newest first. Quiet state (a file's last upload, the Price Feed's age) stays in the rail.
+const INBOX_MAX = 3;
+const Inbox = { items: new Map(), dismissed: new Set() };
+try {
+  for (const k of JSON.parse(localStorage.getItem('inbox-dismissed') || '[]')) Inbox.dismissed.add(k);
+} catch {}
+const noteKey = (n) => `${n.kind}|${n.title}|${n.since || n.at}`;
+
+// { kind, tone: 'ok' | 'info' | 'bad' | 'local' | 'down', title, body (html), report (the text a report is about) }
+function notify(n) {
+  const old = Inbox.items.get(n.kind);
+  if (old && old.title === n.title && old.body === n.body && n.keep) return;
+  Inbox.items.set(n.kind, { at: Date.now(), ...n });
+  renderInbox();
+}
+function unnotify(kind) {
+  if (Inbox.items.delete(kind)) renderInbox();
+}
+function dismissNote(kind) {
+  const n = Inbox.items.get(kind);
+  if (!n) return;
+  Inbox.items.delete(kind);
+  if (n.since) {
+    Inbox.dismissed.add(noteKey(n));
+    try {
+      localStorage.setItem('inbox-dismissed', JSON.stringify([...Inbox.dismissed].slice(-50)));
+    } catch {}
+  }
+  renderInbox();
+}
+
+const NOTE_ICON = {
+  ok: '<path d="M3.5 8.5l3 3 6-7"/>',
+  info: '<circle cx="8" cy="8" r="5.5"/><path d="M8 7.5v3M8 5.2v.1"/>',
+  bad: '<circle cx="8" cy="8" r="5.5"/><path d="M8 5v3.5M8 10.8v.1"/>',
+  local: '<circle cx="8" cy="8" r="5.5"/><path d="M8 5v3.5M8 10.8v.1"/>',
+  down: '<path d="M2.5 6.5a8 8 0 0 1 11 0M4.5 8.8a5 5 0 0 1 7 0M6.8 11a1.8 1.8 0 0 1 2.4 0"/>',
+};
+
+function renderInbox() {
+  const box = $('inbox');
+  const list = [...Inbox.items.values()].filter((n) => !Inbox.dismissed.has(noteKey(n))).sort((a, b) => b.at - a.at).slice(0, INBOX_MAX);
+  box.hidden = !list.length;
+  // a report box being typed in is left alone (paintReport)
+  if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+  box.innerHTML = list
+    .map(
+      (n) => `<div class="notice ${esc(n.tone)}">
+        <svg class="note-icon" viewBox="0 0 16 16" aria-hidden="true">${NOTE_ICON[n.tone] || NOTE_ICON.info}</svg>
+        <div class="note-body"><h3>${esc(n.title)}</h3>${n.body || ''}${n.report != null ? reportSlot(n.report) : ''}</div>
+        <button class="note-x" type="button" data-act="dismiss" data-kind="${esc(n.kind)}" title="Dismiss" aria-label="Dismiss">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
+      </div>`
+    )
+    .join('');
+  paintReports();
+}
+
+// the background's lines (health.rs, the "health" event): they come and go with what is failing
+function renderHealth(h) {
+  S.health = h;
+  R.waiting = h.reports_waiting || 0;
+  const now = new Set();
+  for (const l of h.lines || []) {
+    const kind = `health:${l.kind}`;
+    now.add(kind);
+    notify({ kind, tone: l.tone, title: l.text, report: l.report ? l.text : null, since: l.since, at: l.since * 1000, keep: true });
+  }
+  for (const k of [...Inbox.items.keys()]) if (k.startsWith('health:') && !now.has(k)) Inbox.items.delete(k);
+  renderInbox();
+  renderShared(S.shared);
+  paintReport($('report-foot'));
+}
+
+function changesHtml(changes, failed) {
   const several = new Set(changes.map((c) => c.install)).size > 1;
-  n.innerHTML = `<h3>${esc(title)}</h3>
-    <ul>${changes
-      .map(
-        (c) =>
-          `<li>${esc(c.name)}&ensp;${c.from ? `<span class="from">${esc(c.from)}</span> → ` : ''}<span class="to">${esc(c.to)}</span>${
-            several ? `&ensp;<span class="where">${esc(c.install)}</span>` : ''
-          }</li>`
-      )
-      .join('')}${failed
-      .map((f) =>
+  const rows = changes
+    .map(
+      (c) =>
+        `<li>${esc(c.name)}&ensp;${c.from ? `<span class="from">${esc(c.from)}</span> → ` : ''}<span class="to">${esc(c.to)}</span>${
+          several ? `&ensp;<span class="where">${esc(c.install)}</span>` : ''
+        }</li>`
+    )
+    .concat(
+      failed.map((f) =>
         typeof f === 'string'
           ? `<li>${esc(f)}</li>`
           : `<li><strong>${esc(f.name)}</strong>: ${esc(f.message)}${f.conflict?.length ? ` ${replaceButton(f.id, f.conflict)}` : ''}</li>`
       )
-      .join('')}</ul>
-    ${reloadLine(changes)}
-    <button class="link-button close" type="button" data-act="dismiss">Dismiss</button>
-    ${failed.length ? reportSlot(`${title}: ${failed.map((f) => (typeof f === 'string' ? f : `${f.name}: ${f.message}`)).join('; ')}`) : ''}`;
-  n.hidden = false;
-  if (failed.length) paintReports();
+    )
+    .join('');
+  return (rows ? `<ul>${rows}</ul>` : '') + reloadLine(changes);
+}
+
+// what an action the player started did (`kind`: the automatic updates have their own, so neither hides the other)
+function showChanges(title, changes, failed = [], kind = 'action') {
+  notify({
+    kind,
+    tone: failed.length ? 'bad' : 'ok',
+    title,
+    body: changesHtml(changes, failed),
+    report: failed.length ? `${title}: ${failed.map((f) => (typeof f === 'string' ? f : `${f.name}: ${f.message}`)).join('; ')}` : null,
+  });
 }
 
 function showError(text) {
-  const n = $('notice');
-  n.className = 'notice bad';
-  n.innerHTML = `<h3>${esc(text)}</h3><button class="link-button close" type="button" data-act="dismiss">Dismiss</button>${reportSlot(text)}`;
-  n.hidden = false;
-  paintReports();
+  notify({ kind: 'action', tone: 'bad', title: text, report: text });
   invoke('note_error', { source: 'window', message: text }).catch(() => {});
 }
 
 // an install that failed: its sentence, and "Replace (backup kept)" when folders are in the way
 function showFailure(e, id) {
   if (!(e && typeof e === 'object' && e.conflict?.length && id)) return showError(errText(e));
-  const n = $('notice');
-  n.className = 'notice bad';
-  n.innerHTML = `<h3>${esc(errText(e))}</h3><p>${replaceButton(id, e.conflict)}</p><button class="link-button close" type="button" data-act="dismiss">Dismiss</button>${reportSlot(errText(e))}`;
-  n.hidden = false;
-  paintReports();
+  notify({ kind: 'action', tone: 'bad', title: errText(e), body: `<p>${replaceButton(id, e.conflict)}</p>`, report: errText(e) });
 }
 
 // ------------------------------------------------------------------------------------------------ actions
@@ -1035,7 +1088,7 @@ async function onAction(el) {
     case 'install':
       return doInstall(el.dataset.id, el.dataset.take === '1');
     case 'replace': {
-      $('notice').hidden = true;
+      unnotify('action');
       const it = S.items.find((x) => x.key === el.dataset.id);
       let folders = [];
       try {
@@ -1118,7 +1171,7 @@ async function onAction(el) {
     case 'gh-install':
       return ghInstall(el.dataset.id);
     case 'dismiss':
-      $('notice').hidden = true;
+      dismissNote(el.dataset.kind);
       break;
     case 'report-send':
       return sendReport(el.dataset.shown || '');
@@ -1483,7 +1536,7 @@ async function copyName(name) {
 // "Send error logs to the developer" (src-tauri/src/report.rs): one click sends the app's log, its last errors and
 // what it found, scrubbed, to everlookdb.com and shows the report's id. Every `.report` element is one: its
 // data-shown is the error it sits next to ('' for the quiet "Report a problem" in the sidebar).
-const R = { what: '', sending: new Set(), sent: new Map(), failed: new Map() };
+const R = { what: '', sending: new Set(), sent: new Map(), failed: new Map(), queued: new Set(), waiting: 0 };
 
 // a .report placeholder next to an error
 function reportSlot(shown) {
@@ -1498,6 +1551,10 @@ function paintReport(el) {
   const id = R.sent.get(shown);
   const fail = R.failed.get(shown);
   const busy = R.sending.has(shown);
+  if (R.queued.has(shown)) {
+    el.innerHTML = `<p class="report-sub">Saved: everlookdb.com can’t be reached right now, so the report goes by itself when it’s back. ${what}</p>`;
+    return;
+  }
   const what = `<button class="text-button quiet" type="button" data-act="report-text" data-shown="${esc(shown)}">What gets sent</button>`;
   if (id) {
     el.innerHTML = `<p class="report-done"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>Sent · report <b>${esc(id)}</b>
@@ -1512,7 +1569,7 @@ function paintReport(el) {
   const box = foot ? '' : `<input class="report-what" type="text" maxlength="300" placeholder="What happened? (optional)" aria-label="What happened? (optional)" value="${esc(R.what)}">`;
   el.innerHTML = `<div class="report-row">${button}${box}${foot ? what : ''}</div>
     ${fail ? `<p class="report-fail">Couldn’t send it: ${esc(String(fail.error).replace(/\.$/, ''))}.${fail.file ? ` A copy is saved. <button class="link-button" type="button" data-act="report-show" data-file="${esc(fail.file)}">Show file</button>` : ''}</p>` : ''}
-    ${foot ? '' : `<p class="report-sub">${what}</p>`}`;
+    ${foot ? (R.waiting ? `<p class="report-sub">${plural(R.waiting, 'report waits', 'reports wait')} for everlookdb.com and ${R.waiting === 1 ? 'goes' : 'go'} by itself.</p>` : '') : `<p class="report-sub">${what}</p>`}`;
 }
 
 function paintReports() {
@@ -1532,6 +1589,9 @@ async function sendReport(shown) {
       R.sent.set(shown, r.id);
       R.what = '';
       $('announce').textContent = `Sent: report ${r.id}`;
+    } else if (r.queued) {
+      R.queued.add(shown);
+      R.what = '';
     } else {
       R.failed.set(shown, { error: r.error || 'it didn’t go through', file: r.file });
     }
@@ -1823,11 +1883,21 @@ listen('shared', (e) => renderShared(e.payload));
 listen('catalog', () => loadCatalog(false));
 listen('settings', () => loadState());
 listen('installs', () => loadState().then(loadItems));
+// what updated by itself (failures aren't in it: health.rs shows those when they keep failing)
 listen('updated', (e) => {
-  const { changes, failed } = e.payload;
-  const at = when(new Date().toISOString());
-  showChanges(changes.length ? `Updated ${plural(changes.length, 'addon', 'addons')} automatically, ${at}` : `An automatic update didn’t work, ${at}`, changes, failed);
+  const { changes } = e.payload;
+  if (changes.length) showChanges(`Updated ${plural(changes.length, 'addon', 'addons')} automatically, ${when(new Date().toISOString())}`, changes, [], 'auto');
   loadItems();
+});
+listen('health', (e) => renderHealth(e.payload));
+// a report that waited for the server went out
+listen('report-sent', (e) => {
+  const { shown, id } = e.payload;
+  R.queued.delete(shown);
+  R.sent.set(shown, id);
+  R.waiting = Math.max(0, R.waiting - 1);
+  paintReports();
+  paintReport($('report-foot'));
 });
 
 // the player may have changed AddOns by hand while the window was in the background
