@@ -457,8 +457,8 @@ function mineHtml(i) {
     : '';
   const bar =
     i.game && !q
-      ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready in ${esc(i.name)}${handNote}` : `Everything in ${esc(i.name)} is up to date`}</p>
-         <button class="btn${card ? '' : ' solid'}" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon in ${esc(i.name)} for a new version, then updates all that have one (other games are updated from their own page)">Update all</button></div>`
+      ? `<div class="updates-bar"><p>${updates.length ? `${plural(updates.length, 'update', 'updates')} ready in ${esc(i.name)}${handNote}` : `Everything in ${esc(i.name)} is up to date${S.allChecked ? ` <span class="where">· checked ${esc(when(S.allChecked))}</span>` : ''}`}</p>
+         <button class="btn${card || !updates.length ? '' : ' solid'}" type="button" data-act="update-all" ${busyAttrs('*')} title="Checks every addon in ${esc(i.name)} for a new version, then updates all that have one (other games are updated from their own page)">Update all</button></div>`
       : '';
   return card + bar + `<ul class="rows">${items.map((it) => mineRow(it, i)).join('')}</ul>`;
 }
@@ -1048,11 +1048,12 @@ async function onAction(el) {
         // the newest versions first, so one click never misses a release from the last hour
         await loadCatalog(true);
         const r = await invoke('update_all', { install: S.sel });
-        showChanges(
-          r.changes.length ? `Updated ${plural(r.changes.length, 'addon', 'addons')}` : r.failed.length ? 'Nothing was updated' : 'Everything is up to date',
-          r.changes,
-          r.failed,
-        );
+        // nothing new: the updates bar says so itself ("… is up to date · checked just now"), no second notice
+        if (!r.changes.length && !r.failed.length) {
+          S.allChecked = Date.now();
+          return;
+        }
+        showChanges(r.changes.length ? `Updated ${plural(r.changes.length, 'addon', 'addons')}` : 'Nothing was updated', r.changes, r.failed);
       });
     case 'freeze': {
       const on = !!el.dataset.on;
