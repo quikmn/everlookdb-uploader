@@ -592,6 +592,15 @@ const LIST_EVERY: Duration = Duration::from_secs(15 * 60);
 /// How often unchanged checks are summed up in the log (they write nothing else).
 const QUIET_LOG: Duration = Duration::from_secs(15 * 60);
 
+/// Server or network failures in a row before the Price Feed says so (2 min, then 4 min apart: about 6 min).
+pub const SHOW_AFTER: u32 = 3;
+
+/// Whether a failed check is shown: at once when the app can't write the data addon (nothing a retry fixes),
+/// otherwise from the SHOW_AFTER-th failure in a row.
+pub fn shows_failure(failures: u32, msg: &str) -> bool {
+    msg.starts_with("can't write") || failures >= SHOW_AFTER
+}
+
 /// The wait before the next check. `failures`: errors in a row (0 after a success); `retry_after`: what the server
 /// asked for; `jitter`: a random part, at most JITTER (taken off the minute, added to a backoff).
 pub fn next_wait(failures: u32, retry_after: Option<Duration>, jitter: Duration) -> Duration {
@@ -966,8 +975,14 @@ impl Poller {
                 let wait = next_wait(self.failures, e.retry_after, jitter());
                 self.hold_until = e.retry_after.map(|r| Instant::now() + r.min(MAX_RETRY_AFTER));
                 config::log(&format!("price feed: {}; trying again in {}", e.msg, words(wait)));
-                crate::report::note_error("price feed", &format!("Price Feed: {}", e.msg));
-                (wait, Some(format!("Last check failed: {}", e.msg)))
+                // a short server hiccup (a restart while the site updates answers 502 for a minute) is retried
+                // quietly; only SHOW_AFTER failures in a row, or a local problem, are shown and kept for reports
+                if shows_failure(self.failures, &e.msg) {
+                    crate::report::note_error("price feed", &format!("Price Feed: {}", e.msg));
+                    (wait, Some(format!("Last check failed: {}", e.msg)))
+                } else {
+                    (wait, None)
+                }
             }
             None => {
                 self.failures = 0;
@@ -1447,7 +1462,7 @@ mod tests {
         let (view, wait) = p.refresh(&root, true);
         assert_eq!(take_log().len(), 1, "one request, then it stops");
         assert!(wait >= Duration::from_secs(300) && wait <= Duration::from_secs(305), "{wait:?}");
-        assert!(view.note.as_deref().is_some_and(|n| n.contains("busy")) && view.houses.len() == 1);
+        assert!(view.note.is_none() && view.houses.len() == 1, "a first failure is retried quietly (shows_failure)");
         assert!(p.hold_until.is_some());
         fake.lock().unwrap().busy = Some(1);
         let (_, wait) = p.refresh(&root, true);
@@ -1474,4 +1489,12 @@ mod tests {
         let _ = std::fs::remove_file(cache_path("EU-4-Alliance"));
         let _ = std::fs::remove_dir_all(&root);
     }
+    #[test]
+    fn a_short_server_hiccup_is_retried_quietly() {
+        assert!(!shows_failure(1, "the server answered 502"));
+        assert!(!shows_failure(2, "the server answered 502"));
+        assert!(shows_failure(3, "the server answered 502"));
+        assert!(shows_failure(1, "can't write the data addon (denied)"));
+    }
+
 }
