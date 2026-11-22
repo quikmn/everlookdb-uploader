@@ -10,11 +10,11 @@
     { "id": "github:quikmn/EverlookBar", "summary": "Info bars for XP, gold, bags and more, and a clean minimap." },
     { "id": "github:quikmn/EverlookDBChat", "summary": "Timestamps, class colours, copy chat and chat history." },
     { "id": "github:quikmn/MouseoverMacros", "summary": "Mouseover macros for every class, extended macros, backups and a ring menu." },
-    { "id": "github:quikmn/PlayerNotes", "summary": "Notes on players, shown in tooltips and chat." },
-    { "id": "github:quikmn/DisenchantValue", "summary": "An item's disenchant value on its tooltip." }
+    { "id": "github:quikmn/PlayerNotes", "summary": "Notes on players, shown in tooltips and chat." }
   ],
   "exclude": [
     { "id": "github:quikmn/CraftColors", "why": "stands down for EverlookDB Crafting, which does recipe colours too" },
+    { "id": "github:quikmn/DisenchantValue", "why": "moved into EverlookDB Auctions, which shows the disenchant value in tooltips" },
     { "id": "github:quikmn/QuarryCollector", "why": "the Tooltip Collector, a tool for building the database, not for players" }
   ]
 }
