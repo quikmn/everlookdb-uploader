@@ -968,9 +968,11 @@ const NOTE_ICON = {
   down: '<path d="M2.5 6.5a8 8 0 0 1 11 0M4.5 8.8a5 5 0 0 1 7 0M6.8 11a1.8 1.8 0 0 1 2.4 0"/>',
 };
 
+// problems first (something to do on this PC, then the site down, then a failure), quiet lines after; newest first within
+const RANK = { local: 0, down: 1, bad: 2, ok: 3, info: 4 };
 function renderInbox() {
   const box = $('inbox');
-  const list = [...Inbox.items.values()].filter((n) => !Inbox.dismissed.has(noteKey(n))).sort((a, b) => b.at - a.at).slice(0, INBOX_MAX);
+  const list = [...Inbox.items.values()].filter((n) => !Inbox.dismissed.has(noteKey(n))).sort((a, b) => (RANK[a.tone] ?? 3) - (RANK[b.tone] ?? 3) || b.at - a.at).slice(0, INBOX_MAX);
   box.hidden = !list.length;
   // a report box being typed in is left alone (paintReport)
   if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
