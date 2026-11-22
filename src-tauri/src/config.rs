@@ -107,13 +107,13 @@ pub struct Config {
     /// `World of Warcraft` folders the player added by hand
     #[serde(default)]
     pub extra_roots: Vec<PathBuf>,
-    /// "Update my addons by itself": update the addons we installed, every CHECK_EVERY, without asking
+    /// "Update my addons automatically": update the addons we installed, every CHECK_EVERY, without asking
     #[serde(default = "yes")]
     pub auto_update: bool,
     /// the player set `auto_update` with its switch (so a false is theirs and stays); see migrate()
     #[serde(default)]
     pub auto_update_chosen: bool,
-    /// "Update the app by itself": install new versions of the app quietly (see main.rs spawn_updater)
+    /// "Update the app automatically": install new versions of the app quietly (see main.rs spawn_updater)
     #[serde(default = "yes")]
     pub app_auto_update: bool,
     /// the player set `app_auto_update` with its switch; a false without this is not a choice and is turned on

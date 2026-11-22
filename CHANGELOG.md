@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The update switches now read "Update the app automatically" and "Update my addons automatically".
+
 ## v0.7.7 (2026-11-22)
 
 - New: Freeze an addon to keep the version you have. EverlookDB never updates it until you unfreeze it, and still tells you when a newer one is out.

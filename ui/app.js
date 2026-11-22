@@ -624,7 +624,7 @@ function oursMark(on) {
 const CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
 // a snowflake: frozen ("never update this one")
 const FREEZE_PATH = '<path d="M8 1.5v13M2.4 4.75l11.2 6.5M2.4 11.25l11.2-6.5M6.2 2.6L8 4.2l1.8-1.6M6.2 13.4L8 11.8l1.8 1.6"/>';
-const FROZEN_TIP = 'Frozen: EverlookDB never updates it (not Update all, not by itself). Unfreeze it to update again.';
+const FROZEN_TIP = 'Frozen: EverlookDB never updates it (not Update all, not automatically). Unfreeze it to update again.';
 const frozenBadge = () => `<span class="state frozen" title="${esc(FROZEN_TIP)}"><svg viewBox="0 0 16 16" aria-hidden="true">${FREEZE_PATH}</svg>Frozen</span>`;
 
 // the addon "Update all" is downloading right now, if it is
@@ -910,7 +910,7 @@ function autoLine() {
   const a = S.auto;
   const parts = [];
   if (a) {
-    let did = a.off ? 'checked only (updating by itself is off)' : a.failed ? `${a.updated} updated, ${a.failed} failed` : a.updated ? `updated ${plural(a.updated, 'addon', 'addons')}` : a.waiting ? '' : 'nothing to update';
+    let did = a.off ? 'checked only (automatic updates are off)' : a.failed ? `${a.updated} updated, ${a.failed} failed` : a.updated ? `updated ${plural(a.updated, 'addon', 'addons')}` : a.waiting ? '' : 'nothing to update';
     if (!a.off && a.waiting) did = [did, `${plural(a.waiting, 'update waits', 'updates wait')} until WoW is closed`].filter(Boolean).join(', ');
     parts.push(`Auto check ran ${when(a.at)}: ${did}`);
   }
@@ -1825,7 +1825,7 @@ listen('installs', () => loadState().then(loadItems));
 listen('updated', (e) => {
   const { changes, failed } = e.payload;
   const at = when(new Date().toISOString());
-  showChanges(changes.length ? `Updated ${plural(changes.length, 'addon', 'addons')} by itself, ${at}` : `An automatic update didn’t work, ${at}`, changes, failed);
+  showChanges(changes.length ? `Updated ${plural(changes.length, 'addon', 'addons')} automatically, ${at}` : `An automatic update didn’t work, ${at}`, changes, failed);
   loadItems();
 });
 
