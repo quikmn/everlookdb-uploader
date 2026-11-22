@@ -1,6 +1,6 @@
 [package]
 name = "everlookdb-uploader"
-version = "0.7.5"
+version = "0.7.6"
 description = "EverlookDB: an ad-free World of Warcraft addon manager that also uploads EverlookDB addon data to everlookdb.com"
 authors = ["Viktor Lundgren"]
 license = "GPL-3.0-or-later"
