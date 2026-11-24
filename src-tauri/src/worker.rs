@@ -32,9 +32,10 @@ pub fn uploading() -> bool {
     UPLOADING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// EverlookDB.lua is capped at 5 MB by the server. Auction files are sent gzip-compressed (a 30 MB scan file is a
-/// few MB on the wire), so their cap is on the file as it is on disk.
-pub const MAX_UPLOAD: u64 = 5 * 1024 * 1024;
+/// EverlookDB.lua is capped at 16 MB by the server (crowd.rs MAX_UPLOAD; it was 5 MB, which a player who has seen
+/// most of the game would have passed, and then nothing of theirs was sent any more). Auction files are sent
+/// gzip-compressed (a 30 MB scan file is a few MB on the wire), so their cap is on the file as it is on disk.
+pub const MAX_UPLOAD: u64 = 16 * 1024 * 1024;
 pub const MAX_AUCTIONS_UPLOAD: u64 = 64 * 1024 * 1024;
 const AUCTIONS: &str = "EverlookDBAuctions.lua";
 
@@ -825,7 +826,7 @@ pub fn view_of(label: &str, s: &FileState, now: i64) -> FileView {
 
 /// The plain words for a file over the size limit.
 fn too_big_text(label: &str, mb: u64) -> String {
-    format!("{label}: the file is larger than {mb} MB, so it isn't sent. It goes again by itself once it is smaller (fewer saved scans).")
+    format!("{label}: the file is larger than {mb} MB, so it isn't sent. It goes again by itself once it is smaller.")
 }
 
 /// The server couldn't be reached for this file: the last answer stays as it is (nothing is shown before
@@ -954,6 +955,13 @@ mod tests {
         assert_eq!(rejected_lines(&s), vec!["EU-1-Horde: all rows unknown".to_string(), "R Alliance: too old".to_string()]);
         let (m, s) = parse_refusal(&Value::Null);
         assert!(m.is_none() && s.is_empty());
+    }
+
+    #[test]
+    fn the_collector_file_may_be_as_big_as_the_server_takes() {
+        assert_eq!(max_for(Path::new("EverlookDB.lua")), 16 * 1024 * 1024);
+        assert_eq!(max_for(Path::new("EverlookDBAuctions.lua")), 64 * 1024 * 1024);
+        assert!(!too_big_text("EverlookDB", 16).contains("scans"));
     }
 
     #[test]
