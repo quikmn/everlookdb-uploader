@@ -157,22 +157,71 @@ function sharedAge(at) {
   return h < 36 ? `${h} h old` : `${Math.round(h / 24)} days old`;
 }
 
+// One line per auction house, each with its own age ("Alliance  20 min old", "Neutral  7 h old · behind"): a summary
+// of the newest one hid a house that had stood still for hours (2026-11-26). Amber: a scan the site should have a
+// newer one of by now (shared.rs late_houses), or one over a day old.
 function renderShared(v) {
   if (!v) return;
   S.shared = v;
   $('sw-shared').checked = v.on;
-  const houses = v.houses || [];
-  let text;
-  if (!v.on) text = 'Off';
-  else if (houses.length === 1) text = `${houses[0].key} · ${sharedAge(houses[0].at)}`;
-  else if (houses.length) text = `${houses.length} houses · newest ${sharedAge(Math.max(...houses.map((h) => h.at)))}`;
-  else text = v.note || 'Looking for your auction houses…';
-  $('shared-text').textContent = text;
-  $('shared-text').title = houses.map((h) => `${h.realm} ${h.side} (${h.key}): ${sharedAge(h.at)}`).join('\n');
-  const old = houses.some((h) => Date.now() / 1000 - h.at > 86400);
+  const houses = v.on ? v.houses || [] : [];
+  const now = Date.now() / 1000;
   // a problem that is still there after a while is in the inbox; the dot only turns amber
   const trouble = (S.health?.lines || []).some((l) => l.kind.startsWith('price-feed') || l.kind === 'site-down');
-  $('shared-dot').className = 'dot ' + (!v.on ? '' : trouble || old ? 'busy' : houses.length ? 'ok' : 'idle');
+  $('shared-text').textContent = !v.on ? 'Off' : v.note || 'Looking for your auction houses…';
+  $('shared-dot').className = 'dot ' + (!v.on ? '' : trouble ? 'busy' : 'idle');
+  // the rows say it all; the one line is for when there are none
+  $('shared-text').parentElement.hidden = houses.length > 0;
+  const list = $('shared-houses');
+  list.hidden = !houses.length;
+  const realms = new Set(houses.map((h) => h.realm)).size;
+  list.innerHTML = houses
+    .map((h) => {
+      const amber = trouble || h.late || now - h.at > 86400;
+      const tip = [`${h.realm} ${h.side} (${h.key}): the newest scan is ${sharedAge(h.at)}`];
+      if (h.late) tip.push(h.sibling_at ? `Behind: this realm's other prices are ${sharedAge(h.sibling_at)}.` : 'Behind: everlookdb.com usually has a new scan every hour.');
+      if (v.checked) tip.push(`Checked ${when(v.checked * 1000)}`);
+      return `<li class="ufile" title="${esc(tip.join('\n'))}">
+        <span class="dot ${amber ? 'busy' : 'ok'}"></span>
+        <span class="ufile-name">${esc(realms > 1 ? h.key : h.side)}</span>
+        <span class="ufile-say">${esc(sharedAge(h.at))}${h.late ? ' · behind' : ''}</span>
+      </li>`;
+    })
+    .join('');
+  feedNotices(v, houses);
+}
+
+// What the Price Feed has to say goes to the inbox like everything else: a house whose prices are hours behind while
+// the app itself is working (nothing for the player to fix; "Send report" tells us), and EverlookDB Auctions turned
+// off in the game's addon list while the Price Feed is on (/eah does nothing there, and the game doesn't say why).
+function feedNotices(v, houses) {
+  const late = houses.filter((h) => h.late);
+  if (late.length) {
+    const say = (h) => `${h.realm} ${h.side}: ${sharedAge(h.at)}${h.sibling_at ? ` (this realm's other prices: ${sharedAge(h.sibling_at)})` : ''}`;
+    const title = late.length === 1 ? `${late[0].side} auction prices are behind` : `${late.length} auction houses' prices are behind`;
+    notify({
+      kind: 'feed-late',
+      tone: 'info',
+      title,
+      body: `${late.map((h) => `<p>${esc(say(h))}</p>`).join('')}<p>The app is working: everlookdb.com has no newer scan of ${late.length === 1 ? 'it' : 'them'} yet. There's nothing to fix on your side.</p>`,
+      report: `${title}: ${late.map(say).join('; ')}`,
+      since: Math.max(...late.map((h) => h.at)),
+      at: Math.max(...late.map((h) => h.at)) * 1000,
+      keep: true,
+    });
+  } else unnotify('feed-late');
+  const n = v.on ? v.reader_off || 0 : 0;
+  if (n) {
+    notify({
+      kind: 'feed-reader-off',
+      tone: 'local',
+      title: 'EverlookDB Auctions is turned off in the game',
+      body: `<p>On ${n === 1 ? 'one of your characters' : `${n} of your characters`} the Price Feed is on but EverlookDB Auctions itself is off, so /eah and the prices don't work there. Turn it on in the game's addon list (the AddOns button on the character screen), then log in again.</p>`,
+      since: 1,
+      at: 0,
+      keep: true,
+    });
+  } else unnotify('feed-reader-off');
 }
 setInterval(() => renderShared(S.shared), 30000);
 

@@ -557,7 +557,11 @@ pub fn build_with(inp: &Inputs, log: &str, scrub: &Scrub) -> Value {
         "uploads_from": uploads_from.map(install_json),
         "games": inp.installs.iter().map(install_json).collect::<Vec<_>>(),
         "upload_files": cfg.wow_dir.as_deref().map(saved_variables).unwrap_or_default(),
-        "price_feed": inp.price_feed.map(|v| json!({ "on": v.on, "note": v.note, "houses": v.houses.iter().map(|h| &h.key).collect::<Vec<_>>() })),
+        // each house with its scan time and whether it is behind (shared::late_houses): house keys only, no names
+        "price_feed": inp.price_feed.map(|v| json!({
+            "on": v.on, "note": v.note, "checked": v.checked, "reader_off": v.reader_off,
+            "houses": v.houses.iter().map(|h| json!({ "key": h.key, "at": h.at, "late": h.late, "sibling_at": h.sibling_at })).collect::<Vec<_>>(),
+        })),
         "config": config_json(cfg, scrub),
         "addons": addons,
         "log": log,

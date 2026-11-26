@@ -193,10 +193,13 @@ fn command_line(args: &Args) -> i32 {
         println!("Price Feed: {}", if view.on { "on" } else { "off" });
         let now = chrono::Utc::now().timestamp();
         for h in &view.houses {
-            println!("  {} ({} {}): scan {} min old", h.key, h.realm, h.side, (now - h.at).max(0) / 60);
+            println!("  {} ({} {}): scan {} min old{}", h.key, h.realm, h.side, (now - h.at).max(0) / 60, if h.late { " (late: the site should have a newer one)" } else { "" });
         }
         if let Some(n) = &view.note {
             println!("  {n}");
+        }
+        if view.reader_off > 0 {
+            println!("  EverlookDB Auctions is turned off in the game's addon list on {} character(s) with the Price Feed on", view.reader_off);
         }
         if poller.failing() {
             println!("  The check failed (see uploader.log); the app tries again by itself");

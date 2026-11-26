@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.9 (2026-11-26)
+
+- The Price Feed lists each of your auction houses with how old its prices are. It used to show only the newest one, which hid a house that had stood still for hours.
+- When one auction house's prices are hours behind, the app says so at the top of the window, with a button to tell us about it.
+- If EverlookDB Auctions is turned off in the game's addon list while the Price Feed is on, the app tells you. That's why /eah does nothing on that character.
+- The game now knows when the app last checked for prices, so EverlookDB Auctions can tell you when the app isn't running.
+- A short hiccup on the site no longer takes an auction house's prices out of the game. The app keeps the prices it has for a few hours.
+- Game data files up to 16 MB are uploaded (it was 5 MB).
+
 ## v0.7.8 (2026-11-22)
 
 - Update all with nothing to update no longer shows a second "up to date" box: the bar says it, with when it checked. Update all is only gold when there is something to update.

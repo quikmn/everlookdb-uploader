@@ -12,6 +12,17 @@
 // back off 2, 4, 8, then 15 minutes, or what the server's Retry-After asks, then it is once a minute again; they never
 // touch what is already written; the last good copy of each house is kept in the cache folder.
 //
+// Nothing here may stall without saying so (2026-11-26: one house served a 7 h old scan for a day and nobody knew):
+// - a house whose scan is hours behind (the site feeds it hourly, or the realm's other houses are much newer) is
+//   marked late in the view (`late_houses`): the window shows every house's age, says which one is behind and offers
+//   to send a report;
+// - Shared.lua carries `checked`, the last time the site answered a check (rewritten at most every BEAT_EVERY), so
+//   the addon can tell "the app isn't running" from "the site has no newer scan" and say which;
+// - a house that drops out of the list or answers 404 keeps its copy for GONE_GRACE instead of being deleted from the
+//   game at once (a list that comes back short or empty for a moment took every price away);
+// - characters with the Price Feed on but EverlookDB Auctions turned off in the game's addon list are counted
+//   (`reader_off`): there /eah does nothing and the game doesn't say why.
+//
 // What is written: only the folder EverlookDBAuctions_Shared, nothing else in the game folder. That folder is also a
 // CurseForge addon ("EverlookDB Auctions: Price Feed", D:\Dev\EverlookDBAuctions_Shared) that ships empty, like
 // TradeSkillMaster's AppHelper: the app writes its .toc (the shipped one's Title, Dependencies and IconTexture, and
@@ -70,6 +81,10 @@ pub struct HouseView {
     pub side: String,
     /// server time of the scan (unix seconds)
     pub at: i64,
+    /// its scan is hours behind what the site should have by now (`late_houses`)
+    pub late: bool,
+    /// the newest scan among the realm's other houses (0: there is none)
+    pub sibling_at: i64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
@@ -78,6 +93,10 @@ pub struct View {
     pub houses: Vec<HouseView>,
     /// why there is nothing, or the last error ("everlookdb.com can't be reached; trying again at 14:05")
     pub note: Option<String>,
+    /// when the site last answered a check (unix seconds; 0: not yet)
+    pub checked: i64,
+    /// characters played lately with the Price Feed on but EverlookDB Auctions turned off in the game's addon list
+    pub reader_off: usize,
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -164,6 +183,74 @@ pub fn pick(list: &Value, wanted: &BTreeMap<String, BTreeSet<String>>) -> Vec<St
 
 fn key_ok(key: &str) -> bool {
     !key.is_empty() && key.len() <= 80 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The houses of the list the site fills by itself about once an hour: Blizzard's own (`source`) and the players'
+/// houses linked to one (`link`). Their scan should never be hours old.
+pub fn hourly(list: &Value) -> BTreeSet<String> {
+    list["houses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|h| h["link"].as_str().is_some_and(|l| !l.is_empty()) || h["source"].as_str() == Some("blizzard"))
+        .filter_map(|h| h["key"].as_str().filter(|k| key_ok(k)).map(str::to_string))
+        .collect()
+}
+
+/// A scan this far behind is late.
+pub const LATE_AFTER: i64 = 3 * 3600;
+
+/// The houses whose scan is behind, each with the newest scan among its realm's other houses (0: none): over
+/// LATE_AFTER old, and either the site feeds it hourly (`hourly`) or another house of the same realm is at least
+/// LATE_AFTER newer. A lone house nobody scans is just old, not late.
+pub fn late_houses(houses: &[&House], hourly: &BTreeSet<String>, now: i64) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    for h in houses {
+        if now - h.at <= LATE_AFTER {
+            continue;
+        }
+        let sibling = houses.iter().filter(|o| o.key != h.key && o.region == h.region && o.realm == h.realm).map(|o| o.at).max().unwrap_or(0);
+        if hourly.contains(&h.key) || sibling - h.at >= LATE_AFTER {
+            out.insert(h.key.clone(), sibling);
+        }
+    }
+    out
+}
+
+/// "enabled"/"disabled" of one addon in a character's AddOns.txt ("EverlookDBAuctions: enabled"); None: not listed.
+pub fn addon_state(text: &str, name: &str) -> Option<bool> {
+    text.lines().find_map(|l| {
+        let (n, v) = l.split_once(':')?;
+        (n.trim() == name).then(|| v.trim().eq_ignore_ascii_case("enabled"))
+    })
+}
+
+/// Only characters played in the last 30 days count.
+const PLAYED_WITHIN: Duration = Duration::from_secs(30 * 86400);
+
+/// How many characters played lately have EverlookDB Auctions turned off in the game's addon list while the Price
+/// Feed is left on (WTF/Account/*/<realm>/<character>/AddOns.txt). The game then loads neither, /eah does nothing and
+/// nothing in the game says why; only the app can.
+pub fn reader_off(forever: &Path, now: std::time::SystemTime) -> usize {
+    let mut n = 0;
+    let dirs = |p: &Path| std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>();
+    for account in dirs(&forever.join("WTF").join("Account")) {
+        for realm in dirs(&account) {
+            for character in dirs(&realm) {
+                let file = character.join("AddOns.txt");
+                let fresh = std::fs::metadata(&file).and_then(|m| m.modified()).is_ok_and(|m| now.duration_since(m).map_or(true, |d| d <= PLAYED_WITHIN));
+                if !fresh {
+                    continue;
+                }
+                let Ok(text) = std::fs::read(&file) else { continue };
+                let text = String::from_utf8_lossy(&text);
+                if addon_state(&text, READER) == Some(false) && addon_state(&text, FOLDER) != Some(false) {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -307,12 +394,37 @@ pub fn toc(interface: u32, version: Option<&str>, files: &[String]) -> String {
     t
 }
 
-pub fn shared_lua(written: i64) -> String {
+/// `written`: when the app last wrote a house; `checked`: when the site last answered a check (see `beat`).
+pub fn shared_lua(written: i64, checked: i64) -> String {
     format!(
         "{MARK}: other players' newest auction scans from everlookdb.com.\n\
          -- EverlookDB Auctions reads it at login and /reload, and keeps it apart from your own scans.\n\
-         EverlookDBAuctionsShared = {{ version = 1, written = {written}, houses = {{}} }}\n"
+         EverlookDBAuctionsShared = {{ version = 1, written = {written}, checked = {checked}, houses = {{}} }}\n"
     )
+}
+
+/// The `written = N` of a Shared.lua.
+fn written_of(text: &str) -> Option<i64> {
+    text.split("written = ").nth(1)?.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+/// How often Shared.lua's `checked` is brought up to date while nothing else changes.
+pub const BEAT_EVERY: i64 = 30 * 60;
+
+/// The app is running and the site answered: Shared.lua says so (`checked = now`, its `written` kept), so the addon
+/// can tell old prices the site has nothing newer for from an app that isn't running. Only the app's own filled
+/// Shared.lua is touched; returns whether it was written.
+pub fn beat(addons: &Path, now: i64) -> std::io::Result<bool> {
+    let dir = addons.join(FOLDER);
+    let shared = dir.join("Shared.lua");
+    if !ours(&shared) {
+        return Ok(false);
+    }
+    let Ok(text) = std::fs::read_to_string(&shared) else { return Ok(false) };
+    match written_of(&text).filter(|w| *w > 0) {
+        Some(written) => put(&dir, "Shared.lua", &shared_lua(written, now)),
+        None => Ok(false),
+    }
 }
 
 /// The empty Shared.lua, as the shipped addon has it (written = 0: no data).
@@ -423,7 +535,7 @@ pub fn write_feed(addons: &Path, houses: &[&House], odds: Option<&str>, now: i64
     // Shared.lua (after a CurseForge update, or the feed was off) is replaced
     let shared = dir.join("Shared.lua");
     if changed || !ours(&shared) || std::fs::read_to_string(&shared).is_ok_and(|t| t.contains("written = 0,")) {
-        changed |= put(&dir, "Shared.lua", &shared_lua(now))?;
+        changed |= put(&dir, "Shared.lua", &shared_lua(now, now))?;
     }
     changed |= put(&dir, &format!("{FOLDER}.toc"), &toc(interface_of(addons), version_of(&dir).as_deref(), &names))?;
     changed |= prune(&dir, &names)?;
@@ -592,6 +704,9 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 const LIST_EVERY: Duration = Duration::from_secs(15 * 60);
 /// How often unchanged checks are summed up in the log (they write nothing else).
 const QUIET_LOG: Duration = Duration::from_secs(15 * 60);
+/// How long a house the site stopped listing (or answers 404 for) keeps the copy we have, in seconds: a list that
+/// comes back short for a moment must not take the prices out of the game.
+pub const GONE_GRACE: i64 = 6 * 3600;
 
 /// A failed check as the app's one policy sees it (health.rs): the data addon that can't be written (`local`, in plain
 /// words) is shown at once; a server that is busy, failing or unreachable, or an answer that isn't usable, is retried
@@ -717,6 +832,18 @@ pub struct Poller {
     /// the players' disenchant odds (DEOdds.lua), and when they were last asked
     odds: Option<Odds>,
     odds_asked: Option<Instant>,
+    /// the houses the site fills hourly by itself (`hourly`), from the last list
+    hourly: BTreeSet<String>,
+    /// houses we hold that the site stopped listing or answered 404 for, and since when (unix seconds)
+    absent: BTreeMap<String, i64>,
+    /// when Shared.lua's `checked` was last brought up to date (unix seconds)
+    beat_at: Option<i64>,
+    /// when the site last answered a check (unix seconds; 0: not yet)
+    checked: i64,
+    /// see `reader_off`, counted with each list
+    reader_off: usize,
+    /// the late houses already logged and noted for problem reports
+    late_noted: BTreeSet<String>,
 }
 
 /// The disenchant odds as written (DEOdds.lua) and the ETag of the answer they came from.
@@ -775,6 +902,12 @@ impl Poller {
             quiet_logged: None,
             odds: None,
             odds_asked: None,
+            hourly: BTreeSet::new(),
+            absent: BTreeMap::new(),
+            beat_at: None,
+            checked: 0,
+            reader_off: 0,
+            late_noted: BTreeSet::new(),
         }
     }
 
@@ -833,30 +966,33 @@ impl Poller {
                 config::log("price feed: off, the data addon is empty again");
             }
             health::ok(Job::PriceFeed, "");
-            return (View { on: false, houses: vec![], note: None }, EVERY);
+            return (View { on: false, ..Default::default() }, EVERY);
         }
         if !addons.join(READER).is_dir() {
             health::ok(Job::PriceFeed, "");
             self.last = None;
             let _ = write_stub(&addons);
-            return (View { on, houses: vec![], note: Some("Needs EverlookDB Auctions".into()) }, EVERY);
+            return (View { on, note: Some("Needs EverlookDB Auctions".into()), ..Default::default() }, EVERY);
         }
         let now = unix_now();
         let mut error: Option<Fail> = None;
         // the list of houses: at the first check, every LIST_EVERY and after an upload
         let list_due = self.relist || self.listed.is_none_or(|t| t.elapsed() >= LIST_EVERY);
-        let keys: Vec<String> = if !list_due {
+        let mut keys: Vec<String> = if !list_due {
             self.keys.clone()
         } else {
+            self.reader_off = reader_off(forever, std::time::SystemTime::now());
             match get(&self.http, &format!("{}/api/v1/auctions", self.server), None) {
                 Ok(a) if a.code == 200 => match serde_json::from_slice::<Value>(&a.body) {
-                    Ok(v) => {
+                    // a list without its houses is a bad answer, not "no houses": that would empty the game's copy
+                    Ok(v) if v["houses"].is_array() => {
                         self.keys = pick(&v, &wanted(forever));
+                        self.hourly = hourly(&v);
                         self.listed = Some(Instant::now());
                         self.relist = false;
                         self.keys.clone()
                     }
-                    Err(_) => {
+                    _ => {
                         error = Some(Fail::new("a bad answer"));
                         self.known_keys()
                     }
@@ -872,7 +1008,21 @@ impl Poller {
                 }
             }
         };
+        // the houses to ask the site about; one we hold that it no longer lists keeps its copy for GONE_GRACE, unasked
+        let asked: Vec<String> = keys.clone();
+        for k in self.houses.keys() {
+            if !asked.contains(k) {
+                let since = *self.absent.entry(k.clone()).or_insert_with(|| {
+                    config::log(&format!("price feed: {k} is no longer in the site's list; keeping the copy we have for up to {} h", GONE_GRACE / 3600));
+                    now
+                });
+                if now - since < GONE_GRACE {
+                    keys.push(k.clone());
+                }
+            }
+        }
         self.houses.retain(|k, _| keys.contains(k));
+        self.absent.retain(|k, _| self.houses.contains_key(k));
         for key in &keys {
             if !self.houses.contains_key(key) {
                 if let Some(c) = load_cached(key, now) {
@@ -881,13 +1031,19 @@ impl Poller {
             }
         }
         // which houses to fetch: those whose version moved (every house, each with its ETag, on an older server)
-        let ask: BTreeSet<String> = match &error {
-            None if keys.is_empty() => BTreeSet::new(),
+        let mut ask: BTreeSet<String> = match &error {
+            None if asked.is_empty() => BTreeSet::new(),
             None => {
                 let try_versions = self.no_versions_until.is_none_or(|t| Instant::now() >= t);
-                match if try_versions { fetch_versions(&self.http, &self.server, &keys) } else { Ok(None) } {
+                match if try_versions { fetch_versions(&self.http, &self.server, &asked) } else { Ok(None) } {
                     Ok(Some(v)) => {
                         self.no_versions_until = None;
+                        // a house the site has a version of again is back
+                        for (k, ver) in &v {
+                            if ver.is_some() {
+                                self.absent.remove(k);
+                            }
+                        }
                         moved(&v, &self.houses)
                     }
                     Ok(None) => {
@@ -895,7 +1051,7 @@ impl Poller {
                             config::log("price feed: the server has no versions check yet; asking each house with its ETag");
                             self.no_versions_until = Some(Instant::now() + LIST_EVERY);
                         }
-                        keys.iter().cloned().collect()
+                        asked.iter().cloned().collect()
                     }
                     Err(e) => {
                         error = Some(e);
@@ -904,11 +1060,15 @@ impl Poller {
                 }
             }
             // the list failed: only houses we have nothing of, and only when the server isn't the problem
-            Some(e) if !e.stop => keys.iter().filter(|k| !self.houses.contains_key(*k)).cloned().collect(),
+            Some(e) if !e.stop => asked.iter().filter(|k| !self.houses.contains_key(*k)).cloned().collect(),
             Some(_) => BTreeSet::new(),
         };
+        // a house the site answered 404 for is asked again with each list (every LIST_EVERY), not every minute
+        if !list_due {
+            ask.retain(|k| !self.absent.contains_key(k));
+        }
         let mut changed = false;
-        for key in keys.iter().filter(|k| ask.contains(*k)) {
+        for key in asked.iter().filter(|k| ask.contains(*k)) {
             let etag = self.houses.get(key).and_then(|h| h.1.clone());
             match fetch_house(&self.http, &self.server, key, etag.as_deref(), now) {
                 Ok(Got::New(h, tag)) => {
@@ -916,14 +1076,31 @@ impl Poller {
                     // the checked house, for the next start (a 304 needs it)
                     save_cached(key, &body_of(&h), tag.as_deref());
                     self.houses.insert(key.clone(), (h, tag));
+                    self.absent.remove(key);
                     changed = true;
                 }
-                Ok(Got::Same) => {}
+                Ok(Got::Same) => {
+                    self.absent.remove(key);
+                }
+                // the site has no scans of it (any more): the copy we have stays for GONE_GRACE, then it goes
                 Ok(Got::Gone) => {
-                    changed |= self.houses.remove(key).is_some();
+                    if self.houses.contains_key(key) {
+                        let since = *self.absent.entry(key.clone()).or_insert_with(|| {
+                            config::log(&format!("price feed: the site has no scans of {key} right now; keeping the copy we have for up to {} h", GONE_GRACE / 3600));
+                            now
+                        });
+                        if now - since >= GONE_GRACE {
+                            config::log(&format!("price feed: {key} has been gone from the site for {} h; removed", GONE_GRACE / 3600));
+                            self.houses.remove(key);
+                            self.absent.remove(key);
+                            changed = true;
+                        }
+                    }
                 }
                 Err(e) => {
                     let stop = e.stop;
+                    // one house's own trouble names the house (a busy or unreachable server is everyone's)
+                    let e = if stop { e } else { Fail { msg: format!("{key}: {}", e.msg), ..e } };
                     error.get_or_insert(e);
                     if stop {
                         break;
@@ -980,7 +1157,27 @@ impl Poller {
             }
             Ok(false) => {}
         }
-        let houses = list.iter().map(|h| HouseView { key: h.key.clone(), realm: h.realm.clone(), side: h.side.clone(), at: h.at }).collect();
+        // a house whose scan is hours behind while the site answers: said in the window, logged and noted for problem
+        // reports once (while the site can't be reached, old prices need no second explanation)
+        let late = if error.is_none() { late_houses(&list, &self.hourly, now) } else { BTreeMap::new() };
+        for (key, sibling) in &late {
+            if self.late_noted.insert(key.clone()) {
+                let at = self.houses.get(key).map_or(0, |h| h.0.at);
+                let m = match sibling {
+                    0 => format!("price feed: {key} is late: its newest scan on the site is {} h old", (now - at) / 3600),
+                    s => format!("price feed: {key} is late: its newest scan on the site is {} h old, the realm's other houses' {} min", (now - at) / 3600, (now - s).max(0) / 60),
+                };
+                config::log(&m);
+                crate::report::note_error("price feed", &m);
+            }
+        }
+        if error.is_none() {
+            self.late_noted.retain(|k| late.contains_key(k));
+        }
+        let houses = list
+            .iter()
+            .map(|h| HouseView { key: h.key.clone(), realm: h.realm.clone(), side: h.side.clone(), at: h.at, late: late.contains_key(&h.key), sibling_at: late.get(&h.key).copied().unwrap_or(0) })
+            .collect();
         let (wait, note) = match error {
             Some(e) => {
                 self.failures += 1;
@@ -996,6 +1193,14 @@ impl Poller {
                 health::ok(Job::PriceFeed, "");
                 self.failures = 0;
                 self.hold_until = None;
+                self.checked = now;
+                // the app is running and the site answered: Shared.lua says so, at most every BEAT_EVERY
+                if self.last.is_some() && self.beat_at.is_none_or(|t| now - t >= BEAT_EVERY) {
+                    match beat(&addons, now) {
+                        Ok(_) => self.beat_at = Some(now),
+                        Err(e) => config::log(&format!("price feed: can't update Shared.lua's check time: {e}")),
+                    }
+                }
                 if !changed && !wrote {
                     // an unchanged check logs nothing but a summary: the first one, then one every QUIET_LOG
                     self.quiet += 1;
@@ -1009,7 +1214,7 @@ impl Poller {
                 (next_wait(0, None, jitter()), note)
             }
         };
-        (View { on, houses, note }, wait)
+        (View { on, houses, note, checked: self.checked, reader_off: self.reader_off }, wait)
     }
 }
 
@@ -1055,7 +1260,7 @@ pub fn run(cfg: impl Fn() -> (Option<PathBuf>, bool), server: String, mut report
             let (dir, on) = cfg();
             let (view, wait) = match dir {
                 Some(d) => p.refresh(&d, on),
-                None => (View { on, houses: vec![], note: Some("No WoW Forever folder".into()) }, EVERY),
+                None => (View { on, note: Some("No WoW Forever folder".into()), ..Default::default() }, EVERY),
             };
             report(&view);
             next = Instant::now() + wait;
@@ -1377,6 +1582,12 @@ mod tests {
         body: Vec<u8>,
         busy: Option<u64>,
         log: Vec<String>,
+        /// the list has no houses (a short list)
+        unlisted: bool,
+        /// the list answers 200 without its `houses`
+        bad_list: bool,
+        /// the site has no scans of the house: its version is null and its compact answers 404
+        gone: bool,
     }
 
     fn serve(state: std::sync::Arc<Mutex<Fake>>) -> String {
@@ -1401,11 +1612,20 @@ mod tests {
                 f.log.push(format!("{path}{}", if inm.is_some() { "+etag" } else { "" }));
                 let (code, extra, body): (u16, String, Vec<u8>) = if let Some(secs) = f.busy {
                     (429, format!("Retry-After: {secs}\r\n"), b"{}".to_vec())
+                } else if path == "/api/v1/auctions" && f.bad_list {
+                    (200, String::new(), b"{\"error\":\"busy\"}".to_vec())
                 } else if path == "/api/v1/auctions" {
-                    let list = json!({ "houses": [{ "key": "EU-4-Alliance", "realm": "CAMWOW EU5 Realm 4 PvP", "realm_id": 4, "side": "Alliance" }] });
+                    let list = if f.unlisted {
+                        json!({ "houses": [] })
+                    } else {
+                        json!({ "houses": [{ "key": "EU-4-Alliance", "realm": "CAMWOW EU5 Realm 4 PvP", "realm_id": 4, "side": "Alliance", "link": "EU-B110-Alliance" }] })
+                    };
                     (200, String::new(), list.to_string().into_bytes())
                 } else if path == "/api/v1/auctions/versions?houses=EU-4-Alliance" && f.versions {
-                    (200, String::new(), json!({ "EU-4-Alliance": tag_version(&f.etag) }).to_string().into_bytes())
+                    let v = if f.gone { Value::Null } else { json!(tag_version(&f.etag)) };
+                    (200, String::new(), json!({ "EU-4-Alliance": v }).to_string().into_bytes())
+                } else if path == "/api/v1/auctions/house/EU-4-Alliance/compact" && f.gone {
+                    (404, String::new(), vec![])
                 } else if path == "/api/v1/auctions/house/EU-4-Alliance/compact" {
                     if inm.as_deref() == Some(f.etag.as_str()) {
                         (304, format!("ETag: {}\r\n", f.etag), vec![])
@@ -1422,6 +1642,9 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// The tests that run a Poller share one house's cache file: one at a time.
+    static FEED: Mutex<()> = Mutex::new(());
+
     /// The modified times of every file in the folder: the same after a check means nothing was written.
     fn stamps(dir: &Path) -> Vec<(String, std::time::SystemTime)> {
         let mut v: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().unwrap().modified().unwrap())).collect();
@@ -1431,12 +1654,13 @@ mod tests {
 
     #[test]
     fn a_minute_check_asks_versions_and_writes_nothing_when_unchanged() {
+        let _one = FEED.lock().unwrap_or_else(|e| e.into_inner());
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (root, addons) = game("feed");
         std::fs::create_dir_all(root.join("WTF").join("Account").join("ACC").join("CAMWOW EU5 Realm 4 PvP")).unwrap();
         let _ = std::fs::remove_file(cache_path("EU-4-Alliance"));
         let body1 = body(1_795_000_000).to_string().into_bytes();
-        let fake = std::sync::Arc::new(Mutex::new(Fake { versions: true, etag: "W/\"c1-1795000000-1-20777\"".into(), body: body1, busy: None, log: vec![] }));
+        let fake = std::sync::Arc::new(Mutex::new(Fake { versions: true, etag: "W/\"c1-1795000000-1-20777\"".into(), body: body1, busy: None, log: vec![], unlisted: false, bad_list: false, gone: false }));
         let mut p = Poller::new(&serve(fake.clone()));
         let take_log = || std::mem::take(&mut fake.lock().unwrap().log);
         let dir = addons.join(FOLDER);
@@ -1507,4 +1731,181 @@ mod tests {
         assert!(trouble_of(&busy, Some("EverlookDB isn't allowed to change the Price Feed addon.".into())).is_local());
     }
 
+    fn house(key: &str, side: &str, at: i64) -> House {
+        let mut h = parse(&body(1_795_000_000), "EU-4-Alliance", 1_795_000_100).unwrap();
+        h.key = key.into();
+        h.side = side.into();
+        h.at = at;
+        h
+    }
+
+    #[test]
+    fn a_house_hours_behind_is_late() {
+        let now = 1_795_100_000;
+        let (min, hour) = (60, 3600);
+        // 2026-11-26: Alliance 20 min old, Neutral 7 h old, and nothing said so
+        let a = house("EU-6946-Alliance", "Alliance", now - 20 * min);
+        let n = house("EU-6946-Neutral", "Neutral", now - 7 * hour);
+        let none = BTreeSet::new();
+        assert_eq!(late_houses(&[&a, &n], &none, now), BTreeMap::from([("EU-6946-Neutral".to_string(), a.at)]));
+        // both old together (nobody scanned lately, no hourly feed): old, not late
+        let a_old = house("EU-6946-Alliance", "Alliance", now - 6 * hour);
+        assert!(late_houses(&[&a_old, &n], &none, now).is_empty());
+        // a lone house nobody scans: not late either
+        assert!(late_houses(&[&n], &none, now).is_empty());
+        // one the site fills hourly must never be hours old, alone or not
+        let linked = set(&["EU-6946-Neutral"]);
+        assert_eq!(late_houses(&[&n], &linked, now), BTreeMap::from([("EU-6946-Neutral".to_string(), 0)]));
+        assert!(late_houses(&[&house("EU-6946-Neutral", "Neutral", now - 2 * hour)], &linked, now).is_empty(), "two hours is still fine");
+        // another realm's fresh house says nothing about this one
+        let mut other = house("EU-7-Alliance", "Alliance", now - min);
+        other.realm = "Elsewhere".into();
+        assert!(late_houses(&[&other, &n], &none, now).is_empty());
+        // which houses the site fills hourly: Blizzard's own and the ones linked to one
+        let list = json!({ "houses": [
+            { "key": "EU-6946-Alliance", "link": "EU-B110-Alliance" },
+            { "key": "EU-B110-Alliance", "source": "blizzard" },
+            { "key": "EU-6946-Neutral" },
+            { "key": "EU-1-Horde", "link": "" },
+            { "key": "../x", "link": "EU-B110-Alliance" },
+        ]});
+        assert_eq!(hourly(&list), set(&["EU-6946-Alliance", "EU-B110-Alliance"]));
+    }
+
+    #[test]
+    fn shared_lua_says_when_the_site_last_answered() {
+        let (root, addons) = game("beat");
+        install_stub(&addons);
+        let dir = addons.join(FOLDER);
+        // the shipped empty copy is never touched
+        assert!(!beat(&addons, 500).unwrap());
+        assert!(std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("written = 0,"));
+        let h = parse(&body(1_795_000_000), "EU-4-Alliance", 1_795_000_100).unwrap();
+        write_addon(&addons, &[&h], 100).unwrap();
+        assert!(std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("written = 100, checked = 100,"));
+        // later, nothing new on the site: only the check time moves, the house file isn't touched
+        let before = std::fs::metadata(dir.join("EU-4-Alliance.lua")).unwrap().modified().unwrap();
+        assert!(beat(&addons, 2000).unwrap());
+        let text = std::fs::read_to_string(dir.join("Shared.lua")).unwrap();
+        assert!(text.starts_with(MARK) && text.contains("written = 100, checked = 2000,"), "{text}");
+        assert_eq!(std::fs::metadata(dir.join("EU-4-Alliance.lua")).unwrap().modified().unwrap(), before);
+        assert!(!beat(&addons, 2000).unwrap(), "the same time again writes nothing");
+        // an unchanged write keeps it; the off copy isn't touched
+        assert!(!write_addon(&addons, &[&h], 3000).unwrap());
+        assert!(std::fs::read_to_string(dir.join("Shared.lua")).unwrap().contains("checked = 2000,"));
+        write_stub(&addons).unwrap();
+        assert!(!beat(&addons, 4000).unwrap());
+        // no folder at all: nothing is made
+        let (root2, addons2) = game("beat-none");
+        assert!(!beat(&addons2, 1).unwrap() && !addons2.join(FOLDER).exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    #[test]
+    fn counts_characters_with_the_reader_turned_off() {
+        let (root, _addons) = game("readeroff");
+        let acc = root.join("WTF").join("Account").join("ACC");
+        let put_char = |name: &str, text: &str| {
+            let d = acc.join("Realm").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("AddOns.txt"), text).unwrap();
+        };
+        std::fs::create_dir_all(acc.join("SavedVariables")).unwrap();
+        put_char("Fine", "Bagnon: enabled\nEverlookDBAuctions: enabled\nEverlookDBAuctions_Shared: enabled\n");
+        // the friend's case: the addon off, the Price Feed left on (listed, or not listed yet)
+        put_char("Off", "EverlookDB: enabled\r\nEverlookDBAuctions: disabled\r\nEverlookDBAuctions_Shared: enabled\r\n");
+        put_char("OffUnlisted", "EverlookDBAuctions: disabled\n");
+        // both off: the player's own choice
+        put_char("BothOff", "EverlookDBAuctions: disabled\nEverlookDBAuctions_Shared: disabled\n");
+        put_char("Neither", "Bagnon: enabled\n");
+        let now = std::time::SystemTime::now();
+        assert_eq!(reader_off(&root, now), 2);
+        // a character not played for months doesn't count
+        assert_eq!(reader_off(&root, now + Duration::from_secs(90 * 86400)), 0);
+        assert_eq!(addon_state("EverlookDBAuctions_Shared: enabled\n", READER), None, "a longer name isn't the addon");
+        assert_eq!(reader_off(&root.join("nowhere"), now), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_house_the_site_stops_listing_keeps_its_copy_for_a_while() {
+        let _one = FEED.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (root, addons) = game("grace");
+        std::fs::create_dir_all(root.join("WTF").join("Account").join("ACC").join("CAMWOW EU5 Realm 4 PvP")).unwrap();
+        let _ = std::fs::remove_file(cache_path("EU-4-Alliance"));
+        let fake = std::sync::Arc::new(Mutex::new(Fake {
+            versions: true,
+            etag: "W/\"c1-1795000000-1-20777\"".into(),
+            body: body(1_795_000_000).to_string().into_bytes(),
+            busy: None,
+            log: vec![],
+            unlisted: false,
+            bad_list: false,
+            gone: false,
+        }));
+        let mut p = Poller::new(&serve(fake.clone()));
+        let file = addons.join(FOLDER).join("EU-4-Alliance.lua");
+        let (view, _) = p.refresh(&root, true);
+        assert!(file.is_file() && view.houses.len() == 1 && view.checked > 0);
+        // the scan is years old and the site fills this house hourly (its `link`): late
+        assert!(view.houses[0].late && view.houses[0].sibling_at == 0);
+
+        // the list answers without its houses: a bad answer, the copy stays and the check counts as failed
+        fake.lock().unwrap().bad_list = true;
+        p.relist = true;
+        let (view, _) = p.refresh(&root, true);
+        assert!(p.failing() && file.is_file() && view.houses.len() == 1);
+        assert!(!view.houses[0].late, "nothing is called late while the site can't be asked");
+
+        // the list comes back empty: the house keeps its copy, and isn't asked for
+        {
+            let mut f = fake.lock().unwrap();
+            f.bad_list = false;
+            f.unlisted = true;
+            f.log.clear();
+        }
+        p.relist = true;
+        let (view, _) = p.refresh(&root, true);
+        assert_eq!(std::mem::take(&mut fake.lock().unwrap().log), ["/api/v1/auctions"]);
+        assert!(!p.failing() && file.is_file() && view.houses.len() == 1 && view.note.is_none());
+        assert!(p.absent.contains_key("EU-4-Alliance"));
+        // listed again: asked again, no longer absent
+        fake.lock().unwrap().unlisted = false;
+        p.relist = true;
+        p.refresh(&root, true);
+        assert!(p.absent.is_empty() && file.is_file());
+        // gone for longer than the grace: now it goes
+        fake.lock().unwrap().unlisted = true;
+        p.relist = true;
+        p.refresh(&root, true);
+        *p.absent.get_mut("EU-4-Alliance").unwrap() -= GONE_GRACE;
+        let (view, _) = p.refresh(&root, true);
+        assert!(view.houses.is_empty() && !file.exists() && p.absent.is_empty());
+        assert_eq!(view.note.as_deref(), Some("No scans of your auction houses yet"));
+
+        // listed, but the site has no scans of it (404): the same grace
+        {
+            let mut f = fake.lock().unwrap();
+            f.unlisted = false;
+            f.gone = false;
+        }
+        p.relist = true;
+        p.refresh(&root, true);
+        assert!(file.is_file());
+        fake.lock().unwrap().gone = true;
+        let (view, _) = p.refresh(&root, true);
+        assert!(file.is_file() && view.houses.len() == 1 && p.absent.contains_key("EU-4-Alliance") && !p.failing());
+        // not asked every minute while it is gone, only with each list
+        fake.lock().unwrap().log.clear();
+        p.refresh(&root, true);
+        assert_eq!(std::mem::take(&mut fake.lock().unwrap().log), ["/api/v1/auctions/versions?houses=EU-4-Alliance"]);
+        *p.absent.get_mut("EU-4-Alliance").unwrap() -= GONE_GRACE;
+        p.relist = true;
+        let (view, _) = p.refresh(&root, true);
+        assert!(view.houses.is_empty() && !file.exists());
+        let _ = std::fs::remove_file(cache_path("EU-4-Alliance"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
