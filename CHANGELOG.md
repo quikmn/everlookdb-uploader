@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The app now also updates itself while its window stays open. An update waits for you to close the window, as before, but after 6 hours it also goes in while the window is minimized or behind another window. It never interrupts you while you are using the window.
+
 ## v0.7.9 (2026-11-26)
 
 - The Price Feed lists each of your auction houses with how old its prices are. It used to show only the newest one, which hid a house that had stood still for hours.

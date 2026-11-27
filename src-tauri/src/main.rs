@@ -1814,6 +1814,8 @@ enum WindowNow {
     Closed,
     Hidden,
     Minimized,
+    /// open, but another window has the focus: the player isn't using it right now
+    Unfocused,
     Shown,
 }
 
@@ -1822,15 +1824,28 @@ fn window_now(app: &AppHandle) -> WindowNow {
         None => WindowNow::Closed,
         Some(w) if !w.is_visible().unwrap_or(false) => WindowNow::Hidden,
         Some(w) if w.is_minimized().unwrap_or(false) => WindowNow::Minimized,
+        Some(w) if !w.is_focused().unwrap_or(true) => WindowNow::Unfocused,
         Some(_) => WindowNow::Shown,
     }
 }
 
-/// Whether the app may install its update now. Never while the player has the window (shown, or minimized on the
-/// taskbar): the restart would take it away from under them, and the new version never opens a window by itself.
-/// Never while an addon change or an upload runs (`busy`). So it goes in once the window is closed, quietly.
-fn may_install_app_update(window: WindowNow, busy: bool) -> bool {
-    matches!(window, WindowNow::Closed | WindowNow::Hidden) && !busy
+/// How long a downloaded update waits for the window to be closed. After that it also goes in while the window is
+/// minimized or behind another window: many players keep it open for days, and 0.7.5 to 0.7.8 waited forever.
+const UPDATE_WAITS: Duration = Duration::from_secs(6 * 3600);
+
+/// Whether the app may install its update now. At once when the window is closed. Once the update has waited
+/// UPDATE_WAITS (`waited`), also when the window is minimized or another window has the focus. Never while the
+/// player is using the window (it has the focus): the restart takes the window away, and the new version never opens
+/// one by itself (it is in the tray). Never while an addon change or an upload runs (`busy`).
+fn may_install_app_update(window: WindowNow, busy: bool, waited: bool) -> bool {
+    if busy {
+        return false;
+    }
+    match window {
+        WindowNow::Closed | WindowNow::Hidden => true,
+        WindowNow::Minimized | WindowNow::Unfocused => waited,
+        WindowNow::Shown => false,
+    }
 }
 
 /// Check for a new version of the app 30 seconds after start and then every CHECK_EVERY (10 minutes). When "Update
@@ -1846,6 +1861,8 @@ fn spawn_updater(app: AppHandle) {
         let mut last: Option<chrono::DateTime<chrono::Local>> = None;
         // downloaded and checked, waiting for its moment
         let mut ready: Option<(tauri_plugin_updater::Update, Vec<u8>)> = None;
+        // when the first update now waiting was downloaded (a newer one replacing it keeps the time)
+        let mut ready_since: Option<std::time::Instant> = None;
         // ticks in a row that may_install_app_update said yes (two, 5 s apart, before it goes in)
         let mut quiet = 0;
         let mut waiting_logged = false;
@@ -1859,6 +1876,7 @@ fn spawn_updater(app: AppHandle) {
                     Ok(Some(found)) => {
                         health::ok(health::Job::AppUpdate, "");
                         ready = Some(found);
+                        ready_since.get_or_insert_with(std::time::Instant::now);
                         waiting_logged = false;
                     }
                     Ok(None) => health::ok(health::Job::AppUpdate, ""),
@@ -1869,6 +1887,9 @@ fn spawn_updater(app: AppHandle) {
                     }
                 }
             }
+            if ready.is_none() {
+                ready_since = None;
+            }
             if !on && ready.take().is_some() {
                 config::log("app update: \"Update the app by itself\" was turned off; the downloaded update is dropped");
                 set_app_update(&app, None);
@@ -1876,16 +1897,17 @@ fn spawn_updater(app: AppHandle) {
             if let Some((update, _)) = &ready {
                 let window = window_now(&app);
                 let busy = !manager::idle() || worker::uploading();
-                quiet = if may_install_app_update(window, busy) { quiet + 1 } else { 0 };
-                if quiet == 0 && !waiting_logged && matches!(window, WindowNow::Shown | WindowNow::Minimized) {
-                    config::log(&format!("app update: {} is ready; it installs once the window is closed", update.version));
-                    set_app_update(&app, Some(format!("Version {} installs by itself once this window is closed", update.version)));
+                let waited = ready_since.is_some_and(|t| t.elapsed() >= UPDATE_WAITS);
+                quiet = if may_install_app_update(window, busy, waited) { quiet + 1 } else { 0 };
+                if quiet == 0 && !waiting_logged && matches!(window, WindowNow::Shown | WindowNow::Minimized | WindowNow::Unfocused) {
+                    config::log(&format!("app update: {} is ready; it installs once the window is closed (or in 6 h, while the window isn't in use)", update.version));
+                    set_app_update(&app, Some(format!("Version {} installs by itself once this window is closed, or within 6 hours while you aren't using it", update.version)));
                     waiting_logged = true;
                 }
                 if quiet >= 2 {
                     quiet = 0;
                     if let Some((update, bytes)) = ready.take() {
-                        ready = install_app_update(&app, update, bytes);
+                        ready = install_app_update(&app, update, bytes, waited);
                     }
                 }
             }
@@ -1927,9 +1949,9 @@ fn check_app_update(
 
 /// Hold every addon change off and install. On Windows a working install ends this process (the installer starts
 /// the new version); an update that couldn't start is handed back, to try again at the next quiet moment.
-fn install_app_update(app: &AppHandle, update: tauri_plugin_updater::Update, bytes: Vec<u8>) -> Option<(tauri_plugin_updater::Update, Vec<u8>)> {
+fn install_app_update(app: &AppHandle, update: tauri_plugin_updater::Update, bytes: Vec<u8>, waited: bool) -> Option<(tauri_plugin_updater::Update, Vec<u8>)> {
     let Some(hold) = manager::hold() else { return Some((update, bytes)) };
-    if worker::uploading() || !may_install_app_update(window_now(app), false) {
+    if worker::uploading() || !may_install_app_update(window_now(app), false, waited) {
         return Some((update, bytes));
     }
     save_window(app);
@@ -1970,12 +1992,23 @@ mod tests {
 
     #[test]
     fn the_app_update_waits_while_the_window_is_open() {
-        assert!(may_install_app_update(WindowNow::Closed, false));
-        assert!(may_install_app_update(WindowNow::Hidden, false));
-        assert!(!may_install_app_update(WindowNow::Shown, false));
-        assert!(!may_install_app_update(WindowNow::Minimized, false));
+        assert!(may_install_app_update(WindowNow::Closed, false, false));
+        assert!(may_install_app_update(WindowNow::Hidden, false, false));
+        assert!(!may_install_app_update(WindowNow::Shown, false, false));
+        assert!(!may_install_app_update(WindowNow::Minimized, false, false));
+        assert!(!may_install_app_update(WindowNow::Unfocused, false, false));
         // an addon change or an upload is running
-        assert!(!may_install_app_update(WindowNow::Closed, true));
+        assert!(!may_install_app_update(WindowNow::Closed, true, false));
+    }
+
+    #[test]
+    fn a_long_waiting_update_goes_in_while_the_window_sits_unused() {
+        // the window kept open for days (0.7.5 to 0.7.8 never updated that way)
+        assert!(may_install_app_update(WindowNow::Minimized, false, true));
+        assert!(may_install_app_update(WindowNow::Unfocused, false, true));
+        // never while the player is using the window, nor while something runs
+        assert!(!may_install_app_update(WindowNow::Shown, false, true));
+        assert!(!may_install_app_update(WindowNow::Unfocused, true, true));
     }
 
     /// The top-level function each line of main.rs is in (before the tests).
